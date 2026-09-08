@@ -55,13 +55,14 @@ if ([string]::Equals([System.IO.Path]::GetPathRoot($outputRoot), $outputRootComp
 
 $specPath = Join-Path $repoRoot "packaging\fishing_mvp.spec"
 $manifestPath = Join-Path $repoRoot "packaging\runtime-manifest.json"
+$constraintsPath = Join-Path $repoRoot "packaging\constraints-windows.txt"
 $configPath = Join-Path $repoRoot "config\default.yaml"
 $launcherPaths = @(
     (Join-Path $repoRoot "portable\START.bat"),
     (Join-Path $repoRoot "portable\STOP.bat"),
     (Join-Path $repoRoot "portable\使用說明.txt")
 )
-foreach ($requiredPath in @($specPath, $manifestPath, $configPath) + $launcherPaths) {
+foreach ($requiredPath in @($specPath, $manifestPath, $constraintsPath, $configPath) + $launcherPaths) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Required build input is missing: $requiredPath"
     }
@@ -132,11 +133,11 @@ try {
 
     Invoke-Checked -FilePath $buildPython -ArgumentList @(
         "-c",
-        "import sys; raise SystemExit('Python 3.10 or newer is required') if sys.version_info < (3, 10) else None"
+        "import sys; sys.exit('Python 3.10 or newer is required') if sys.version_info < (3, 10) else None"
     )
     Invoke-Checked -FilePath $buildPython -ArgumentList @(
         "-c",
-        "import struct; raise SystemExit('A 64-bit Python interpreter is required') if struct.calcsize('P') != 8 else None"
+        "import struct, sys; sys.exit('A 64-bit Python interpreter is required') if struct.calcsize('P') != 8 else None"
     )
     $pythonVersion = (& $buildPython --version 2>&1 | Out-String).Trim()
     Write-Host "Using $pythonVersion"
@@ -146,6 +147,7 @@ try {
     $projectInstallSpec = "{0}[scrcpy]" -f $repoRoot
     Invoke-Checked -FilePath $buildPython -ArgumentList @(
         "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--no-cache-dir",
+        "--constraint", $constraintsPath,
         ("pyinstaller=={0}" -f $pyInstallerVersion),
         $projectInstallSpec
     )
@@ -259,6 +261,8 @@ if getattr(sys, "frozen", False):
     $launcherContent = @"
 @echo off
 setlocal
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 set "PATH=%~dp0scrcpy;%PATH%"
 "%~dp0FishingMVP.exe" %*
 exit /b %ERRORLEVEL%

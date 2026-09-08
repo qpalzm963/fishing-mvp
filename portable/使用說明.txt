@@ -37,8 +37,10 @@ Fishing MVP Windows x64 portable 前置版
 
 START.bat 只把 runtime\scrcpy 暫時放在目前程序樹的 PATH 最前面，並且只使用
 portable 目錄內的 adb.exe、scrcpy.exe、scrcpy-server 與 FishingMVP.exe。它會
-使用 --capture scrcpy --live --full-auto 啟動；scrcpy 任何啟動或解碼失敗都會
-停止並顯示原因，絕不 fallback 到 ADB screenshot。
+先用同一台裝置的 probe 辨識目前前景 package；若無法辨識就停止，不會在未知
+App 上送出輸入。成功後使用 --package、--capture scrcpy --live --full-auto
+啟動；scrcpy 任何啟動或解碼失敗都會停止並顯示原因，絕不 fallback 到 ADB
+screenshot。批次檔會切換 UTF-8 console，JSON／中文診斷可直接閱讀。
 
 discover-device JSON 契約
 -------------------------------
@@ -104,5 +106,5 @@ START.bat 預期呼叫：
 
 * macOS 開發機無法執行 Windows `.bat` 或 Windows x64 build；請在 Windows
   PowerShell 執行 `packaging\build_windows.ps1`。
-* GitHub Actions 會產生 artifact；只有 versioned tag 或手動指定 tag 才會
-  建立 GitHub Release。
+* GitHub Actions 會產生 artifact；只有 versioned tag 或從 `main` 手動指定 tag
+  才會建立 GitHub Release。手動從 feature branch dispatch 不會發布。

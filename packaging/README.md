@@ -9,6 +9,9 @@ fresh checkout. The script creates an isolated build environment, pins
 PyInstaller 6.13.0, downloads the official `scrcpy-win64-v4.1.zip`, verifies
 SHA256 `5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db`,
 and fails before assembling anything if a prerequisite or archive check fails.
+Application and native Python dependencies are installed with the exact pins in
+`constraints-windows.txt`; the resolved set is repeated in
+`runtime-manifest.json` for package inspection.
 
 ```powershell
 .\packaging\build_windows.ps1 -OutputDirectory .\build\fishing-mvp-windows
@@ -40,11 +43,17 @@ build/fishing-mvp-windows/
 ```
 
 Use the root `START.bat` for the operator flow. It asks for a strict 1–999
-round count, discovers exactly one authorized device, and starts the real
-live full-auto path. `runtime\fishing-mvp.cmd` is the developer entrypoint;
+round count, discovers exactly one authorized device, resolves the current
+foreground package, and starts the real live full-auto path with that package
+as a safety boundary. `runtime\fishing-mvp.cmd` is the developer entrypoint;
 both entrypoints resolve bundled tools without a system-wide scrcpy/ADB
 installation. The script never overwrites an existing `runtime/`, `config/`,
 or manifest artifact, so use a new output directory for each build.
+
+The assembled smoke contract runs `runtime-smoke` through the frozen executable
+to import PyAV, create an H.264 decoder, and load the packaged config. It also
+runs frozen `discover-device` with bundled ADB and expects the controlled
+`no_devices` response on a device-free CI runner.
 
 Examples:
 
@@ -58,4 +67,6 @@ The build also copies `START.bat`, `STOP.bat`, and `使用說明.txt` to the pac
 root. The official scrcpy distribution is copied intact so its native dependencies
 and `scrcpy-server` stay version-matched. Keep its included notices/licenses
 with the portable package when redistributing it. Windows device smoke tests
-remain CI-only until a clean Windows host runs the generated ZIP.
+remain CI-only until a clean Windows host runs the generated ZIP. Manual Release
+dispatch is accepted only when the selected ref is `main`; versioned tag pushes
+are the other release path.

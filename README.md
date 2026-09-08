@@ -45,7 +45,11 @@ GitHub Actions。Windows 機器可在 PowerShell 執行：
 輸出會包含根目錄 `START.bat`／`STOP.bat`、`config\default.yaml`、可選的
 `config\user.yaml`，以及 `runtime\FishingMVP.exe` 與 pinned scrcpy v4.1
 官方檔案。雙擊 `START.bat` 後輸入 1–999 輪；它只會在偵測到恰好一台已授權
-裝置時啟動，並強制使用 scrcpy，不會靜默 fallback 到 ADB screenshot。
+裝置、且能辨識目前前景 package 時啟動，並強制使用 scrcpy，不會靜默 fallback
+到 ADB screenshot。啟動前也會把 package 傳入 live runner，持續做前景安全檢查。
+Windows build 使用 `packaging/constraints-windows.txt` 固定 app/native 依賴，
+並由 frozen `FishingMVP.exe runtime-smoke` 實際驗證 packaged config 與 PyAV
+H.264 decoder；只有 `main` 的手動 dispatch 或 `v*` tag push 會發布 Release。
 完整流程與限制請見 [`packaging/README.md`](packaging/README.md) 與
 [`portable/使用說明.txt`](portable/使用說明.txt)。
 
@@ -84,7 +88,7 @@ python -m fishing_mvp debug \
 18.46s prompt -> 18.63s qte <-> quality -> 23.66s result -> 26.31s waiting
 ```
 
-兩次 prompt 都從偵測到的 action button 中心產生 tap proposal；離線分析預設不產生 QTE 點擊，QTE 執行需在 live 模式明確加上 `--enable-qte`，或使用下方的 `--full-auto`。QTE live 模式會用最近數幀的 marker 位移估算速度，預測輸入延遲後的位置並提前點擊；沒有穩定速度時才退回當前影格的即時判斷。
+兩次 prompt 都從偵測到的 action button 中心產生 tap proposal；離線分析預設不產生 QTE 點擊，QTE 執行需在 live 模式明確加上 `--enable-qte`，或使用下方的 `--full-auto`。QTE live 模式會用最近數幀的 marker 位移估算速度，預測輸入延遲後的位置並提前點擊；沒有穩定速度時才退回當前影格的即時判斷。目標色帶改以黃色像素的相對 span、像素數與連續欄位覆蓋率動態判定，因此較窄的 QTE 目標也能辨識；紅色 marker 中心使用中位數，寬度使用分位數 span 並套用合理上限，點擊判斷同時納入 marker 中心與 marker 寬度。若 marker 暫時遮住窄目標，偵測器會在同一個相對 gauge 內以最多 4 幀、最多 18% 寬度的短 envelope 合併鄰近黃色片段，並容許最多 4 個缺失影格；gauge 改變或跳躍過大時會清除追蹤，避免沿用上一個 QTE。
 
 ## Live / scrcpy / ADB
 
@@ -159,7 +163,7 @@ python -m fishing_mvp live \
 - `--package` 若提供，前景 package 會週期性檢查；不一致時會在下一次輸入前停止。週期檢查避免每一次 QTE tap 都被 `dumpsys` 阻塞。
 - ADB 斷線、解析度／方向改變、偵測信心不足或狀態未知時停止或不動作。
 - 程式不會自動啟動、切換、重啟或 force-stop App。
-- `--enable-qte` 採即時單擊事件模型；QTE 速度預測、輸入延遲、點擊間隔與按壓時間可在 YAML 調整。
+- `--enable-qte` 採即時單擊事件模型；QTE 速度預測、輸入延遲、點擊間隔與按壓時間可在 YAML 調整。窄目標的 `gauge_target_min_color_pixels`、`gauge_target_min_width_ratio`、`gauge_target_min_width_px` 與 `gauge_target_min_column_coverage` 控制偵測下限；`gauge_marker_max_width_ratio` 避免背景紅色元素被當成 marker 寬度；`gauge_target_tracking_frames`、`gauge_target_tracking_max_width_ratio`、`gauge_target_tracking_max_gap_ratio` 與 `gauge_target_tracking_missing_frames` 控制窄目標的短暫連續追蹤；預測點擊未觀察到實際入框時，會在 `qte_prediction_grace_s` 後重新武裝，保留後續掃掠的補救機會。
 - `result_extra_tap_enabled` 與 `result_extra_tap_delay_s` 控制獎勵動畫的一次性額外點擊；位置由中央結果內容的輪廓動態產生。
 - `--full-auto` 只會操作已在前景且符合 `--package` 的遊戲；它不會替使用者切換 App。
 - 完整自動化的各階段 timeout 在 `config/default.yaml` 的 `automation` 區段設定；超時會停止，不會改用固定座標猜測。
@@ -172,6 +176,15 @@ scrcpy 模式會從與桌面 binary 同版本的 scrcpy-server 接收 H.264 影�
 scrcpy 影像是畫面變更驅動的；靜止 UI 會重用最新幀，避免等待畫面因沒有新封包而誤判 timeout。若裝置解析度／方向和串流不相容，live runner 會在送出前停止。
 scrcpy live session 同時建立 video 與 control socket；TAP 會傳送 scrcpy 4.1 的 DOWN／UP control event，不再為每次點擊啟動 `adb shell input tap` subprocess。若 scrcpy／control socket 無法建立，`auto` 會整體回退到 ADB screenshot 與 ADB input，兩種來源的延遲樣本不會混用；`scrcpy` 強制模式則會直接報錯。live 的 `live_detections.jsonl` 與 `live_summary.json` 會記錄 video PTS、封包到達／解碼時間、frame age、CV 分析時間、control dispatch 時間，以及下一個影格／離開 QTE 的觀測延遲。
 macOS 的 OpenCV 與 PyAV wheel 可能各自攜帶 FFmpeg，啟動時會出現 AVFoundation duplicate-class 警告；本機實測串流仍穩定，若遇到解碼不穩可先改用 `--capture adb`。
+
+Frozen runtime 的診斷命令會輸出 JSON，供 Windows package smoke 使用：
+
+```bash
+python -m fishing_mvp runtime-smoke
+```
+
+它只載入 packaged `default.yaml`，並在目前 executable 的 Python runtime 中建立
+H.264 decoder；失敗時回傳 exit code 2，不會嘗試連線或操作 Android 裝置。
 
 ## 設定
 

@@ -1,5 +1,8 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
+chcp 65001 >nul
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 
 rem Fishing MVP portable launcher.  Every path is relative to this file.
 set "PORTABLE_ROOT=%~dp0"
@@ -15,6 +18,8 @@ set "RUN_DIR=%PORTABLE_ROOT%\run"
 set "PID_FILE=%RUN_DIR%\FishingMVP.pid"
 set "DISCOVERY_JSON=%RUN_DIR%\discover-device.json"
 set "DISCOVERY_ERR=%RUN_DIR%\discover-device.err"
+set "FOREGROUND_JSON=%RUN_DIR%\foreground-package.json"
+set "FOREGROUND_ERR=%RUN_DIR%\foreground-package.err"
 
 rem Keep the bundled tools first, but only for this launcher process tree.
 set "PATH=%SCRCPY_DIR%;%PATH%"
@@ -79,13 +84,24 @@ set "DEVICE_SERIAL="
 for /f "usebackq delims=" %%S in (`powershell.exe -NoProfile -Command "$p=Get-Content -Raw -LiteralPath $env:FISHING_DISCOVERY_JSON | ConvertFrom-Json; if ($p.ok -eq $true -and $p.serial -is [string] -and $p.serial.Length -gt 0) { [Console]::WriteLine($p.serial) }" 2^>nul`) do set "DEVICE_SERIAL=%%S"
 if not defined DEVICE_SERIAL goto :discovery_failed
 
+del /q "%FOREGROUND_JSON%" >nul 2>&1
+del /q "%FOREGROUND_ERR%" >nul 2>&1
+"%MVP_EXE%" probe --serial "%DEVICE_SERIAL%" --adb-path "%ADB_PATH%" --scrcpy-path "%SCRCPY_PATH%" > "%FOREGROUND_JSON%" 2> "%FOREGROUND_ERR%"
+set "FOREGROUND_EXIT=%ERRORLEVEL%"
+if not "%FOREGROUND_EXIT%"=="0" goto :foreground_failed
+set "FISHING_FOREGROUND_JSON=%FOREGROUND_JSON%"
+set "FISHING_DEVICE_SERIAL=%DEVICE_SERIAL%"
+set "PACKAGE_NAME="
+for /f "usebackq delims=" %%P in (`powershell.exe -NoProfile -Command "$p=Get-Content -Raw -LiteralPath $env:FISHING_FOREGROUND_JSON | ConvertFrom-Json; if ($p.serial -eq $env:FISHING_DEVICE_SERIAL -and $p.foreground_package -is [string] -and $p.foreground_package -match '^[A-Za-z0-9._]+$') { [Console]::WriteLine($p.foreground_package) }" 2^>nul`) do set "PACKAGE_NAME=%%P"
+if not defined PACKAGE_NAME goto :foreground_failed
+
 set "CONFIG_ARG="
 if exist "%CONFIG_PATH%" set "CONFIG_ARG=--config "%CONFIG_PATH%""
 set "FISHING_MVP_EXE=%MVP_EXE%"
 set "FISHING_ROOT=%PORTABLE_ROOT%"
 set "FISHING_RUN_DIR=%RUN_DIR%"
 set "FISHING_DEVICE_SERIAL=%DEVICE_SERIAL%"
-set "FISHING_MVP_ARGS=live --serial "%DEVICE_SERIAL%" --capture scrcpy --live --full-auto --max-rounds %MAX_ROUNDS_VALUE% --adb-path "%ADB_PATH%" --scrcpy-path "%SCRCPY_PATH%" --output-dir "%RUN_DIR%" %CONFIG_ARG%"
+set "FISHING_MVP_ARGS=live --serial "%DEVICE_SERIAL%" --package "%PACKAGE_NAME%" --capture scrcpy --live --full-auto --max-rounds %MAX_ROUNDS_VALUE% --adb-path "%ADB_PATH%" --scrcpy-path "%SCRCPY_PATH%" --output-dir "%RUN_DIR%" %CONFIG_ARG%"
 
 set "MVP_PID="
 for /f "usebackq delims=" %%P in (`powershell.exe -NoProfile -Command "$p=Start-Process -FilePath $env:FISHING_MVP_EXE -ArgumentList $env:FISHING_MVP_ARGS -WorkingDirectory $env:FISHING_ROOT -PassThru; $p.Id" 2^>nul`) do set "MVP_PID=%%P"
@@ -110,6 +126,13 @@ if exist "%DISCOVERY_JSON%" type "%DISCOVERY_JSON%"
 if exist "%DISCOVERY_ERR%" type "%DISCOVERY_ERR%"
 echo 請確認只有一台裝置、已允許 USB debugging，且狀態不是 offline。
 exit /b 6
+
+:foreground_failed
+echo [錯誤] 無法安全辨識目前前景 App package；程式未啟動。
+if exist "%FOREGROUND_JSON%" type "%FOREGROUND_JSON%"
+if exist "%FOREGROUND_ERR%" type "%FOREGROUND_ERR%"
+echo 請先讓釣魚遊戲保持在手機前景，再重新執行 START.bat。
+exit /b 8
 
 :ensure_not_running
 if not exist "%PID_FILE%" exit /b 0

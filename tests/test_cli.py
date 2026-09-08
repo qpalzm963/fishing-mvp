@@ -60,6 +60,40 @@ def test_discover_device_cli_returns_exit_code_two_for_selection_error(monkeypat
     assert payload["error"]["code"] == "multiple_authorized_devices"
 
 
+def test_runtime_smoke_cli_emits_success_payload(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "_runtime_smoke",
+        lambda: {
+            "ok": True,
+            "config_loaded": True,
+            "codec": "h264",
+            "decoder_name": "h264",
+            "pyav_version": "18.1.0",
+        },
+    )
+
+    assert cli.main(["runtime-smoke"]) == 0
+
+    assert json.loads(capsys.readouterr().out)["codec"] == "h264"
+
+
+def test_runtime_smoke_cli_returns_exit_code_two_for_diagnostic_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "_runtime_smoke",
+        lambda: {
+            "ok": False,
+            "error": {"code": "pyav_h264_unavailable", "message": "decoder unavailable"},
+        },
+    )
+
+    assert cli.main(["runtime-smoke"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["code"] == "pyav_h264_unavailable"
+
+
 @pytest.mark.parametrize("value", ["0", "1000", "-1", "abc"])
 def test_max_rounds_rejects_values_outside_strict_launcher_contract(value):
     with pytest.raises(SystemExit):

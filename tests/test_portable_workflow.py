@@ -29,6 +29,7 @@ def test_windows_workflow_installs_and_invokes_the_portable_contract() -> None:
 
     assert "python -m pip install '.[dev,scrcpy]'" in workflow
     assert "python -m pip install pyinstaller" in workflow
+    assert "--constraint packaging/constraints-windows.txt" in workflow
     assert "packaging/build_windows.ps1" in workflow
     assert "& $contract -OutputDirectory $packageRoot" in workflow
     assert 'FISHING_MVP_SCRCPY_VERSION: "4.1"' in workflow
@@ -45,7 +46,10 @@ def test_smoke_tests_target_the_assembled_portable_directory() -> None:
         assert runtime_file in workflow
     assert "runtime-manifest.json" in workflow
     assert "scrcpy_version -ne '4.1'" in workflow
-    assert "CodecContext.create('h264', 'r')" in workflow
+    assert "runtime-smoke" in workflow
+    assert "config_loaded" in workflow
+    assert "discover-device --adb-path" in workflow
+    assert "no_devices" in workflow
     assert "PyAV files were not found in the frozen portable package" in workflow
     assert "Compress-Archive" in workflow
     assert "uses: actions/upload-artifact@v4" in workflow
@@ -58,7 +62,7 @@ def test_release_publish_is_gated_and_permissions_are_minimal() -> None:
     assert re.search(r"(?ms)^permissions:\n  contents: read\n", workflow)
     assert re.search(r"(?ms)^    permissions:\n      contents: write\n", release_job)
     assert "needs: windows-portable" in release_job
-    assert "if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}" in release_job
+    assert "if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}" in release_job
     assert "uses: actions/download-artifact@v4" in release_job
     assert "uses: softprops/action-gh-release@v2" in release_job
     assert "files: release/*.zip" in release_job
@@ -72,3 +76,4 @@ def test_manual_release_requires_a_versioned_tag_input() -> None:
 
     assert re.search(r"(?ms)^      release_tag:\n.*?required: true\n.*?type: string", workflow)
     assert "if [[ ! \"$release_tag\" =~ ^v[0-9] ]]" in workflow
+    assert "Manual releases are only allowed from refs/heads/main" in workflow

@@ -1,5 +1,8 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
+chcp 65001 >nul
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 
 rem Stop only the FishingMVP.exe PID recorded by this portable launcher.
 set "PORTABLE_ROOT=%~dp0"
@@ -9,6 +12,8 @@ set "RUN_DIR=%PORTABLE_ROOT%\run"
 set "PID_FILE=%RUN_DIR%\FishingMVP.pid"
 set "DISCOVERY_JSON=%RUN_DIR%\discover-device.json"
 set "DISCOVERY_ERR=%RUN_DIR%\discover-device.err"
+set "FOREGROUND_JSON=%RUN_DIR%\foreground-package.json"
+set "FOREGROUND_ERR=%RUN_DIR%\foreground-package.err"
 
 if not exist "%PID_FILE%" (
     echo 沒有找到這個 portable 目錄的執行中 FishingMVP.exe。
@@ -50,5 +55,7 @@ if errorlevel 1 (
 del /q "%PID_FILE%" >nul 2>&1
 del /q "%DISCOVERY_JSON%" >nul 2>&1
 del /q "%DISCOVERY_ERR%" >nul 2>&1
+del /q "%FOREGROUND_JSON%" >nul 2>&1
+del /q "%FOREGROUND_ERR%" >nul 2>&1
 echo 已安全停止這個 portable 目錄啟動的 Fishing MVP。
 exit /b 0

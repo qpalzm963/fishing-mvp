@@ -54,6 +54,55 @@ def _max_rounds(value: str) -> int:
     return rounds
 
 
+def _runtime_smoke() -> dict[str, object]:
+    """Exercise imports that are intentionally lazy in the live path.
+
+    This command is used by the assembled Windows package smoke test. It
+    loads the packaged baseline config and creates an H.264 decoder from the
+    frozen executable itself, so a missing PyAV/FFmpeg DLL cannot be hidden by
+    a successful build-environment import.
+    """
+
+    packaged_config = _repo_default_config()
+    if packaged_config is None:
+        return {
+            "ok": False,
+            "error": {
+                "code": "config_unavailable",
+                "message": "找不到 packaged default.yaml。",
+            },
+        }
+    try:
+        load_config(packaged_config)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {
+                "code": "config_unavailable",
+                "message": f"無法載入 packaged default.yaml：{exc}",
+            },
+        }
+    try:
+        import av
+
+        decoder = av.CodecContext.create("h264", "r")
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {
+                "code": "pyav_h264_unavailable",
+                "message": f"無法建立 PyAV H.264 decoder：{exc}",
+            },
+        }
+    return {
+        "ok": True,
+        "config_loaded": True,
+        "codec": "h264",
+        "decoder_name": str(getattr(decoder, "name", "h264")),
+        "pyav_version": getattr(av, "__version__", None),
+    }
+
+
 def _add_video_args(parser: argparse.ArgumentParser, default_output: str) -> None:
     parser.add_argument("--input", required=True, help="Input video path")
     parser.add_argument("--output-dir", default=default_output, help="Directory for debug artefacts")
@@ -95,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--serial", help="Optional ADB serial to inspect")
     probe.add_argument("--adb-path", help="Explicit ADB executable path")
     probe.add_argument("--scrcpy-path", help="Explicit scrcpy executable path")
+
+    subparsers.add_parser(
+        "runtime-smoke",
+        help="Exercise packaged config and the PyAV H.264 decoder from this executable",
+    )
 
     discover = subparsers.add_parser("discover-device", help="Safely select exactly one authorized ADB device")
     discover.add_argument("--adb-path", help="ADB executable path; frozen builds use the bundled copy")
@@ -157,6 +211,10 @@ def main(argv: list[str] | None = None) -> int:
                 result["foreground_package"] = controller.foreground_package()
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "runtime-smoke":
+            payload = _runtime_smoke()
+            print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            return 0 if payload.get("ok") is True else 2
         if args.command == "discover-device":
             from .device_discovery import DeviceDiscovery
 
