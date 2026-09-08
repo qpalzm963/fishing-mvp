@@ -197,37 +197,32 @@ jobs:
           }
 
           $adbPath = Join-Path $scrcpyRoot 'adb.exe'
-          # Use Start-Process for the intentional exit-code-2 contract. This
-          # keeps stdout/stderr as bytes in files and avoids PowerShell's
-          # native pipeline conversion changing the frozen JSON or stopping
-          # before the exit code can be inspected.
-          $discoverStdoutPath = Join-Path $env:RUNNER_TEMP "fishing-mvp-discover-$env:GITHUB_RUN_ID.stdout"
-          $discoverStderrPath = Join-Path $env:RUNNER_TEMP "fishing-mvp-discover-$env:GITHUB_RUN_ID.stderr"
-          Remove-Item -LiteralPath $discoverStdoutPath, $discoverStderrPath -Force -ErrorAction SilentlyContinue
-          $discoverArguments = @(
-            'discover-device'
-            '--adb-path'
-            ('"{0}"' -f $adbPath)
-            '--json'
-          )
-          $discoverProcess = Start-Process -FilePath $exe.FullName `
-            -ArgumentList $discoverArguments `
-            -RedirectStandardOutput $discoverStdoutPath `
-            -RedirectStandardError $discoverStderrPath `
-            -NoNewWindow -Wait -PassThru
+          # Use ProcessStartInfo for the intentional exit-code-2 contract.
+          # It captures stdout/stderr without PowerShell's native pipeline,
+          # while WaitForExit only waits for the frozen process itself. This
+          # matters because adb may leave its server descendant running.
+          $discoverInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $discoverInfo.FileName = $exe.FullName
+          $discoverInfo.UseShellExecute = $false
+          $discoverInfo.CreateNoWindow = $true
+          $discoverInfo.RedirectStandardOutput = $true
+          $discoverInfo.RedirectStandardError = $true
+          [void]$discoverInfo.ArgumentList.Add('discover-device')
+          [void]$discoverInfo.ArgumentList.Add('--adb-path')
+          [void]$discoverInfo.ArgumentList.Add($adbPath)
+          [void]$discoverInfo.ArgumentList.Add('--json')
+          $discoverProcess = [System.Diagnostics.Process]::new()
+          $discoverProcess.StartInfo = $discoverInfo
+          if (-not $discoverProcess.Start()) {
+            throw 'Frozen discover-device process could not be started'
+          }
+          $discoverStdoutTask = $discoverProcess.StandardOutput.ReadToEndAsync()
+          $discoverStderrTask = $discoverProcess.StandardError.ReadToEndAsync()
+          $discoverProcess.WaitForExit()
           $discoverExit = $discoverProcess.ExitCode
-          $discoverText = if (Test-Path -LiteralPath $discoverStdoutPath -PathType Leaf) {
-            [System.IO.File]::ReadAllText($discoverStdoutPath).Trim()
-          }
-          else {
-            ''
-          }
-          $discoverErrorText = if (Test-Path -LiteralPath $discoverStderrPath -PathType Leaf) {
-            [System.IO.File]::ReadAllText($discoverStderrPath).Trim()
-          }
-          else {
-            ''
-          }
+          $discoverText = $discoverStdoutTask.GetAwaiter().GetResult().Trim()
+          $discoverErrorText = $discoverStderrTask.GetAwaiter().GetResult().Trim()
+          $discoverProcess.Dispose()
           if ($discoverExit -ne 2) {
             throw "Frozen discover-device expected exit code 2 on the device-free runner, got ${discoverExit}. stdout=$discoverText stderr=$discoverErrorText"
           }

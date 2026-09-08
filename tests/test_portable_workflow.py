@@ -43,9 +43,10 @@ def test_smoke_tests_target_the_assembled_portable_directory() -> None:
 
     assert "& $exe.FullName --help" in workflow
     assert "$PSNativeCommandUseErrorActionPreference = $false" in workflow
-    assert "Start-Process -FilePath $exe.FullName" in workflow
-    assert "-RedirectStandardOutput $discoverStdoutPath" in workflow
-    assert "-RedirectStandardError $discoverStderrPath" in workflow
+    assert "[System.Diagnostics.ProcessStartInfo]::new()" in workflow
+    assert "RedirectStandardOutput = $true" in workflow
+    assert "RedirectStandardError = $true" in workflow
+    assert "$discoverProcess.WaitForExit()" in workflow
     for runtime_file in ("scrcpy.exe", "adb.exe", "scrcpy-server", "AdbWinApi.dll", "AdbWinUsbApi.dll"):
         assert runtime_file in workflow
     assert "runtime-manifest.json" in workflow
