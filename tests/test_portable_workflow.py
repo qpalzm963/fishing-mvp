@@ -31,7 +31,7 @@ def test_windows_workflow_installs_and_invokes_the_portable_contract() -> None:
     assert "python -m pip install pyinstaller" in workflow
     assert "--constraint packaging/constraints-windows.txt" in workflow
     assert "packaging/build_windows.ps1" in workflow
-    assert "& $contract -OutputDirectory $packageRoot" in workflow
+    assert "& $contract -OutputDirectory $packageRoot -PythonCommand python" in workflow
     assert 'FISHING_MVP_SCRCPY_VERSION: "4.1"' in workflow
     assert "must pin and record scrcpy 4.1" in workflow
     assert "python -m pytest -q" in workflow

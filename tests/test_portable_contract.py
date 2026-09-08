@@ -17,6 +17,7 @@ def test_build_contract_copies_operator_launchers_and_uses_the_frozen_name():
     assert 'name="FishingMVP"' in spec
     assert 'PACKAGE_DEFAULT_FILE = SOURCE_ROOT / "fishing_mvp" / "defaults" / "default.yaml"' in spec
     assert 'sys.exit(\'Python 3.10 or newer is required\')' in script
+    assert 'sys.exit(\'Python 3.10 through 3.13 is required for PyInstaller 6.13.0\')' in script
     assert 'sys.exit(\'A 64-bit Python interpreter is required\')' in script
     assert '"--constraint", $constraintsPath' in script
 
@@ -63,6 +64,7 @@ def test_windows_constraints_and_manifest_record_the_resolved_build_set():
         assert f"{package}=={version}" in constraints
     assert "pyinstaller==6.13.0" in constraints
     assert manifest["build_contract"]["python_constraints"] == "packaging/constraints-windows.txt"
+    assert manifest["build_contract"]["python_runtime"] == ">=3.10,<3.14"
     assert manifest["build_contract"]["python_dependencies"] == expected
 
 

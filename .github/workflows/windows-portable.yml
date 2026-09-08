@@ -91,7 +91,7 @@ jobs:
           # -OutputDirectory.  The environment variable is also available to
           # future packaging helpers without becoming the required interface.
           $env:FISHING_MVP_PORTABLE_OUTPUT = $packageRoot
-          & $contract -OutputDirectory $packageRoot
+          & $contract -OutputDirectory $packageRoot -PythonCommand python
           if ($LASTEXITCODE) {
             throw "packaging/build_windows.ps1 failed with exit code $LASTEXITCODE"
           }

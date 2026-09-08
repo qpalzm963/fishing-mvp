@@ -19,8 +19,9 @@
     refuses to overwrite existing runtime/config artifacts.
 
 .PARAMETER PythonCommand
-    Optional Python launcher or executable.  By default py.exe is preferred,
-    then python.exe.  Python 3.10 or newer is required.
+    Optional Python launcher or executable.  By default python.exe is
+    preferred, then py.exe.  Python 3.10 through 3.13 is required by the
+    pinned PyInstaller 6.13.0 build contract.
 #>
 
 [CmdletBinding()]
@@ -111,9 +112,9 @@ try {
         $pythonInfo = Get-Command $PythonCommand -ErrorAction Stop
     }
     else {
-        $pythonInfo = Get-Command "py.exe" -ErrorAction SilentlyContinue
+        $pythonInfo = Get-Command "python.exe" -ErrorAction SilentlyContinue
         if ($null -eq $pythonInfo) {
-            $pythonInfo = Get-Command "python.exe" -ErrorAction Stop
+            $pythonInfo = Get-Command "py.exe" -ErrorAction Stop
         }
     }
 
@@ -134,6 +135,10 @@ try {
     Invoke-Checked -FilePath $buildPython -ArgumentList @(
         "-c",
         "import sys; sys.exit('Python 3.10 or newer is required') if sys.version_info < (3, 10) else None"
+    )
+    Invoke-Checked -FilePath $buildPython -ArgumentList @(
+        "-c",
+        "import sys; sys.exit('Python 3.10 through 3.13 is required for PyInstaller 6.13.0') if sys.version_info >= (3, 14) else None"
     )
     Invoke-Checked -FilePath $buildPython -ArgumentList @(
         "-c",

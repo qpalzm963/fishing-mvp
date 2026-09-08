@@ -9,6 +9,9 @@ fresh checkout. The script creates an isolated build environment, pins
 PyInstaller 6.13.0, downloads the official `scrcpy-win64-v4.1.zip`, verifies
 SHA256 `5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db`,
 and fails before assembling anything if a prerequisite or archive check fails.
+The pinned PyInstaller contract supports Python 3.10 through 3.13; the CI job
+passes its setup-python 3.12 executable explicitly so the Windows `py.exe`
+launcher cannot silently select a newer incompatible interpreter.
 Application and native Python dependencies are installed with the exact pins in
 `constraints-windows.txt`; the resolved set is repeated in
 `runtime-manifest.json` for package inspection.
