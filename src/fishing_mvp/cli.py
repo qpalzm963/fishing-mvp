@@ -29,6 +29,7 @@ def _add_video_args(parser: argparse.ArgumentParser, default_output: str) -> Non
     parser.add_argument("--analysis-fps", type=float, default=None, help="Detector sampling rate; video output keeps source FPS")
     parser.add_argument("--max-seconds", type=float, default=None)
     parser.add_argument("--no-video", action="store_true", help="Skip annotated MP4 generation")
+    parser.add_argument("--full-auto", action="store_true", help="Preview start, QTE, and result actions offline")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,14 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
     debug = subparsers.add_parser("debug", help="Offline analysis with annotated debug artefacts")
     _add_video_args(debug, "outputs/debug")
 
-    live = subparsers.add_parser("live", help="Read ADB screenshots; dry-run unless --live is explicit")
+    live = subparsers.add_parser("live", help="Read live device frames; dry-run unless --live is explicit")
     live.add_argument("--serial", required=True, help="ADB device serial")
     live.add_argument("--package", help="Expected foreground package; no package is launched")
     live.add_argument("--config", help="YAML configuration path")
-    live.add_argument("--fps", type=float, default=None, help="ADB screenshot loop rate")
+    live.add_argument("--capture", choices=("auto", "scrcpy", "adb"), default="auto", help="Live frame source")
+    live.add_argument("--fps", type=float, default=None, help="Detector sampling rate")
+    live.add_argument("--qte-fps", type=float, default=None, help="QTE/QUALITY detector sampling rate")
     live.add_argument("--output-dir", default="outputs/live")
     live.add_argument("--max-seconds", type=float, default=None)
     live.add_argument("--live", action="store_true", help="Actually send ADB input; omit for dry-run")
+    live.add_argument("--full-auto", action="store_true", help="Enable dynamic start -> QTE -> result automation")
+    live.add_argument("--max-rounds", type=int, default=None, help="Full-auto rounds before stopping (default: 1)")
     live.add_argument("--enable-qte", action="store_true", help="Allow QTE tap proposals to be sent")
     live.add_argument("--auto-continue", action="store_true", help="Allow a detected result continue button to be tapped")
 
@@ -62,6 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command in {"analyze-video", "debug"}:
             config = _config(args.config)
+            if args.full_auto:
+                config.action.auto_start = True
+                config.action.qte_enabled = True
+                config.action.auto_continue = True
             summary = analyze_video(
                 args.input,
                 args.output_dir,
@@ -76,15 +85,20 @@ def main(argv: list[str] | None = None) -> int:
             config = _config(args.config)
             if args.fps is not None:
                 config.capture_fps = max(0.5, args.fps)
+            if args.qte_fps is not None:
+                config.qte_capture_fps = max(0.5, args.qte_fps)
             summary = run_live(
                 serial=args.serial,
                 package=args.package,
                 config=config,
                 output_dir=args.output_dir,
+                capture_mode=args.capture,
                 send_actions=args.live,
                 qte_enabled=args.enable_qte,
                 auto_continue=args.auto_continue,
                 max_seconds=args.max_seconds,
+                full_auto=args.full_auto,
+                max_rounds=args.max_rounds,
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0

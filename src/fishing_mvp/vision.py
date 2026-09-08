@@ -170,9 +170,12 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
     min_radius = max(8, int(width * config.button_min_radius_ratio))
     max_radius = max(min_radius + 4, int(width * config.button_max_radius_ratio))
     candidates: list[_ButtonCandidate] = []
+    search_top = max(0, int(height * config.button_min_y_ratio - max_radius - 8))
+    search_bottom = min(height, int(height * config.button_max_y_ratio + max_radius + 8))
+    search_blurred = blurred[search_top:search_bottom, :]
 
     circles = cv2.HoughCircles(
-        blurred,
+        search_blurred,
         cv2.HOUGH_GRADIENT,
         dp=1.2,
         minDist=max(12, int(width * 0.12)),
@@ -183,6 +186,7 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
     )
     if circles is not None:
         for raw_cx, raw_cy, raw_radius in np.round(circles[0]).astype(int):
+            raw_cy += search_top
             y_ratio = raw_cy / max(1, height)
             if y_ratio < config.button_min_y_ratio or y_ratio > config.button_max_y_ratio:
                 continue
@@ -200,7 +204,7 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
 
     # A contour fallback handles anti-aliased rings that do not produce a
     # stable Hough circle on some devices or video codecs.
-    edges = cv2.Canny(blurred, 45, 130)
+    edges = cv2.Canny(search_blurred, 45, 130)
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     for contour in _contours(edges):
         area = cv2.contourArea(contour)
@@ -213,6 +217,7 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
         if circularity < 0.45:
             continue
         (cx, cy), radius = cv2.minEnclosingCircle(contour)
+        cy += search_top
         y_ratio = cy / max(1, height)
         if y_ratio < config.button_min_y_ratio or y_ratio > config.button_max_y_ratio or not (min_radius <= radius <= max_radius):
             continue
@@ -224,6 +229,72 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
     if not candidates:
         return None, False, 0.0, {"purple_ratio": 0.0, "saturation": 0.0}
     best = max(candidates, key=lambda candidate: candidate.score)
+    active_score = min(1.0, best.purple_ratio / 0.30) * 0.72 + min(1.0, best.mean_saturation / 150.0) * 0.28
+    active = best.purple_ratio >= config.button_active_purple_ratio or best.mean_saturation >= config.button_active_saturation
+    return best.box, bool(active), float(best.score), {
+        "purple_ratio": round(best.purple_ratio, 4),
+        "saturation": round(best.mean_saturation, 2),
+        "active_score": round(active_score, 4),
+    }
+
+
+def detect_action_button_nearby(
+    frame: np.ndarray,
+    previous: Box,
+    config: DetectorConfig,
+) -> tuple[Box | None, bool, float, dict[str, float]]:
+    """Track a previously detected button through a small local ROI.
+
+    QTE frames arrive at a higher cadence than idle frames.  Re-running the
+    full-frame Hough search for every QTE frame adds avoidable latency, while
+    the action control itself normally remains stable.  This fast path still
+    verifies the circle from the current pixels and falls back to the full
+    detector when the local track is not convincing.
+    """
+
+    height, width = frame.shape[:2]
+    previous_radius = max(8.0, min(previous.w, previous.h) / 2.0)
+    expand = previous_radius * 1.45
+    roi = _clip_box(
+        previous.cx - expand,
+        previous.cy - expand,
+        expand * 2.0,
+        expand * 2.0,
+        width,
+        height,
+    )
+    crop = _crop(frame, roi)
+    if crop.size == 0:
+        return None, False, 0.0, {"purple_ratio": 0.0, "saturation": 0.0}
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (7, 7), 1.5)
+    circles = cv2.HoughCircles(
+        blurred,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=max(8, int(previous_radius * 0.85)),
+        param1=70,
+        param2=22,
+        minRadius=max(8, int(previous_radius * 0.62)),
+        maxRadius=max(9, int(previous_radius * 1.38)),
+    )
+    if circles is None:
+        return None, False, 0.0, {"purple_ratio": 0.0, "saturation": 0.0}
+    candidates: list[_ButtonCandidate] = []
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    for raw_cx, raw_cy, raw_radius in np.round(circles[0]).astype(int):
+        cx = raw_cx + roi.x
+        cy = raw_cy + roi.y
+        radius = float(raw_radius)
+        if abs(cx - previous.cx) > previous_radius * 0.70 or abs(cy - previous.cy) > previous_radius * 0.70:
+            continue
+        purple_ratio, sat = _button_colour_metrics(hsv, cx, cy, radius, config)
+        score = _score_button(width, height, cx, cy, radius, purple_ratio, sat)
+        box = _clip_box(cx - radius, cy - radius, radius * 2, radius * 2, width, height)
+        candidates.append(_ButtonCandidate(box, radius, score, purple_ratio, sat))
+    if not candidates:
+        return None, False, 0.0, {"purple_ratio": 0.0, "saturation": 0.0}
+    best = min(candidates, key=lambda candidate: abs(candidate.box.cx - previous.cx) + abs(candidate.box.cy - previous.cy))
     active_score = min(1.0, best.purple_ratio / 0.30) * 0.72 + min(1.0, best.mean_saturation / 150.0) * 0.28
     active = best.purple_ratio >= config.button_active_purple_ratio or best.mean_saturation >= config.button_active_saturation
     return best.box, bool(active), float(best.score), {
@@ -473,7 +544,97 @@ def detect_continue_button(frame: np.ndarray, result_visible: bool) -> Box | Non
         fill = cv2.contourArea(contour) / max(1.0, w * h)
         box = Box(roi.x + x, roi.y + y, w, h)
         candidates.append((float(np.clip(0.65 * fill + 0.35 * green_ratio, 0.0, 1.0)), box))
-    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+
+    # Some result variants use a small grey dismiss/continue X instead of a
+    # green bar.  Detect its high-contrast compact contour relative to the
+    # bottom-center of the current framebuffer; do not fall back to a fixed
+    # coordinate or an unconditional center tap.
+    icon_roi = _clip_box(width * 0.30, height * 0.92, width * 0.40, height * 0.075, width, height)
+    icon_crop = _crop(frame, icon_roi)
+    gray = cv2.cvtColor(icon_crop, cv2.COLOR_BGR2GRAY)
+    icon_mask = cv2.inRange(gray, 20, 130)
+    icon_mask = cv2.morphologyEx(icon_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    icon_mask = cv2.morphologyEx(icon_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    icon_candidates: list[tuple[float, Box]] = []
+    for contour in _contours(icon_mask):
+        x, y, w, h = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        if area < 80 or w <= 0 or h <= 0 or not 0.35 <= w / float(h) <= 2.8:
+            continue
+        box = Box(icon_roi.x + x, icon_roi.y + y, w, h)
+        if abs(box.cx - width / 2.0) > width * 0.12:
+            continue
+        fill = area / max(1.0, w * h)
+        center_score = 1.0 - min(1.0, abs(box.cx - width / 2.0) / max(1.0, width * 0.12))
+        icon_candidates.append((float(np.clip(0.65 * fill + 0.35 * center_score, 0.0, 1.0)), box))
+    return max(icon_candidates, key=lambda item: item[0])[1] if icon_candidates else None
+
+
+def detect_result_fallback_tap(
+    frame: np.ndarray,
+    result_visible: bool,
+    continue_box: Box | None = None,
+) -> Box | None:
+    """Find one safe, dynamic tap target inside a result reward animation.
+
+    A few result variants keep the reward animation on screen after the
+    visible dismiss/continue control is tapped.  The fallback is intentionally
+    limited to the central reward content: it uses the largest compact,
+    high-contrast contour in a ratio-based ROI and never falls back to a fixed
+    screen coordinate.  If no convincing content contour exists, returning
+    ``None`` lets the live runner fail safe instead of guessing.
+    """
+
+    if not result_visible:
+        return None
+    height, width = frame.shape[:2]
+    roi = _clip_box(width * 0.12, height * 0.16, width * 0.76, height * 0.66, width, height)
+    crop = _crop(frame, roi)
+    if crop.size == 0:
+        return None
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 30, 120)
+    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+
+    component_count, _, stats, centroids = cv2.connectedComponentsWithStats(edges, 8)
+    frame_area = float(max(1, width * height))
+    min_area = max(120, int(frame_area * 0.002))
+    candidates: list[tuple[float, Box]] = []
+    for index in range(1, component_count):
+        x, y, box_width, box_height, area = [int(value) for value in stats[index]]
+        if area < min_area or box_width <= 0 or box_height <= 0:
+            continue
+        # Border-touching components are usually the dimmed game background,
+        # dock, or celebration bands rather than the reward object.
+        if x <= 0 or y <= 0 or x + box_width >= roi.w - 1 or y + box_height >= roi.h - 1:
+            continue
+        box = Box(roi.x + x, roi.y + y, box_width, box_height)
+        if continue_box is not None and _overlap_ratio(box, continue_box) >= 0.20:
+            continue
+        center_x = float(centroids[index][0] + roi.x)
+        center_y = float(centroids[index][1] + roi.y)
+        if abs(center_x - width / 2.0) > width * 0.34:
+            continue
+        compactness = float(area / max(1.0, box_width * box_height))
+        area_score = min(1.0, area / max(1.0, frame_area * 0.025))
+        center_score = 1.0 - min(1.0, abs(center_x - width / 2.0) / max(1.0, width * 0.34))
+        vertical_score = 1.0 - min(1.0, abs(center_y - height * 0.48) / max(1.0, height * 0.32))
+        compact_score = min(1.0, compactness / 0.40)
+        score = float(
+            0.38 * area_score
+            + 0.24 * center_score
+            + 0.20 * vertical_score
+            + 0.18 * compact_score
+        )
+        candidates.append((score, box))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 class FrameAnalyzer:
@@ -482,6 +643,8 @@ class FrameAnalyzer:
     def __init__(self, config: DetectorConfig):
         self.config = config
         self.previous_gray: np.ndarray | None = None
+        self.previous_button_work: Box | None = None
+        self.previous_work_size: tuple[int, int] | None = None
 
     def _water_activity(self, gray: np.ndarray, button: Box | None) -> float:
         small = cv2.resize(gray, (160, max(80, int(round(gray.shape[0] * 160 / gray.shape[1])))), interpolation=cv2.INTER_AREA)
@@ -500,12 +663,23 @@ class FrameAnalyzer:
             return 0.0
         return float(np.mean(roi >= self.config.motion_threshold))
 
-    def analyze(self, frame: np.ndarray, frame_index: int, timestamp_s: float) -> Detection:
+    def analyze(self, frame: np.ndarray, frame_index: int, timestamp_s: float, *, fast: bool = False) -> Detection:
         height, width = frame.shape[:2]
         work, scale = _prepare_frame(frame, self.config.max_work_width)
         work_h, work_w = work.shape[:2]
         gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-        work_button, active, button_score, button_features = detect_action_button(work, self.config)
+        if fast and self.previous_button_work is not None and self.previous_work_size == (work_w, work_h):
+            work_button, active, button_score, button_features = detect_action_button_nearby(
+                work,
+                self.previous_button_work,
+                self.config,
+            )
+            if work_button is None:
+                work_button, active, button_score, button_features = detect_action_button(work, self.config)
+        else:
+            work_button, active, button_score, button_features = detect_action_button(work, self.config)
+        self.previous_button_work = work_button
+        self.previous_work_size = (work_w, work_h)
         work_prompt, prompt_score = detect_prompt(work, work_button, self.config)
         work_gauge, gauge_score, marker_x, target_range = detect_gauge(work, work_button, self.config)
         prompt_progress = _overlap_ratio(work_prompt, work_gauge) >= 0.30
@@ -514,6 +688,8 @@ class FrameAnalyzer:
             # the later QTE bar and must not trigger QTE/quality states.
             work_gauge, gauge_score, marker_x, target_range = None, 0.0, None, None
         work_quality, quality_score, quality_pixels = detect_quality(work, work_button, work_gauge, self.config)
+        gauge_state_visible = work_gauge is not None and gauge_score >= self.config.gauge_min_state_score
+        quality_state_visible = work_quality is not None and gauge_state_visible
 
         button = _restore_box(work_button, scale, width, height)
         prompt = _restore_box(work_prompt, scale, width, height)
@@ -544,15 +720,16 @@ class FrameAnalyzer:
             result_score = max(result_score, 0.72)
         result_box = Box(0, 0, width, height) if result_visible else None
         continue_box = detect_continue_button(frame, result_visible)
+        result_fallback_box = detect_result_fallback_tap(frame, result_visible, continue_box)
         water_activity = self._water_activity(gray, work_button)
 
         if result_visible:
             hint = FishingState.RESULT
             confidence = result_score
-        elif work_quality is not None:
+        elif quality_state_visible:
             hint = FishingState.QUALITY
             confidence = quality_score
-        elif gauge is not None:
+        elif gauge_state_visible:
             hint = FishingState.QTE
             confidence = gauge_score
         elif prompt is not None:
@@ -597,6 +774,7 @@ class FrameAnalyzer:
             result_box=result_box,
             result_score=result_score,
             continue_box=continue_box,
+            result_fallback_box=result_fallback_box,
             water_activity=water_activity,
             hint=hint,
             confidence=float(np.clip(confidence, 0.0, 1.0)),

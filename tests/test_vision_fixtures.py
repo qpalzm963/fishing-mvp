@@ -5,7 +5,7 @@ import numpy as np
 
 from fishing_mvp.config import DetectorConfig
 from fishing_mvp.models import FishingState
-from fishing_mvp.vision import FrameAnalyzer, color_mask, detect_continue_button
+from fishing_mvp.vision import FrameAnalyzer, color_mask, detect_continue_button, detect_result_fallback_tap
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -48,6 +48,18 @@ def test_qte_fixture_detects_gauge_marker_and_target_range():
     assert 0.0 <= detection.gauge_marker_x <= 1.0
 
 
+def test_qte_fast_path_keeps_dynamic_button_and_gauge_detection():
+    analyzer = FrameAnalyzer(DetectorConfig())
+    frame = load_fixture("qte")
+    analyzer.analyze(frame, 0, 0.0)
+    detection = analyzer.analyze(frame, 1, 1 / 30.0, fast=True)
+
+    assert detection.hint == FishingState.QTE
+    assert detection.action_button is not None
+    assert detection.gauge_box is not None
+    assert detection.gauge_marker_x is not None
+
+
 def test_quality_fixture_detects_quality_label_without_ocr():
     detection = FrameAnalyzer(DetectorConfig()).analyze(load_fixture("quality"), 0, 0.0)
     assert detection.hint == FishingState.QUALITY
@@ -63,6 +75,7 @@ def test_result_fixture_uses_normalized_yellow_ratio_and_no_false_continue():
     assert detection.result_box is not None
     assert detection.features["center_yellow_ratio"] > config.result_yellow_ratio
     assert detection.continue_box is None
+    assert detection.result_fallback_box is not None
 
     smaller = cv2.resize(frame, (270, 585), interpolation=cv2.INTER_AREA)
     smaller_detection = FrameAnalyzer(config).analyze(smaller, 0, 0.0)
@@ -76,6 +89,24 @@ def test_continue_detector_accepts_a_wide_green_control():
     box = detect_continue_button(frame, result_visible=True)
     assert box is not None
     assert box.w > box.h * 2
+
+
+def test_continue_detector_accepts_a_centered_gray_dismiss_icon():
+    frame = np.zeros((1170, 540, 3), dtype=np.uint8)
+    cv2.line(frame, (250, 1100), (290, 1140), (70, 70, 70), 8)
+    cv2.line(frame, (290, 1100), (250, 1140), (70, 70, 70), 8)
+    box = detect_continue_button(frame, result_visible=True)
+    assert box is not None
+    assert abs(box.cx / frame.shape[1] - 0.5) < 0.1
+    assert box.y / frame.shape[0] > 0.9
+
+
+def test_result_fallback_detector_uses_a_central_reward_contour():
+    frame = load_fixture("result")
+    box = detect_result_fallback_tap(frame, result_visible=True)
+    assert box is not None
+    assert abs(box.cx / frame.shape[1] - 0.5) < 0.2
+    assert 0.25 < box.cy / frame.shape[0] < 0.70
 
 
 def test_purple_mask_uses_detector_hsv_configuration():

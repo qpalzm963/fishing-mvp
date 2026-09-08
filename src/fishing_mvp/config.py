@@ -11,7 +11,7 @@ import yaml
 
 @dataclass
 class DetectorConfig:
-    max_work_width: int = 760
+    max_work_width: int = 480
     purple_hue_low: int = 125
     purple_hue_high: int = 179
     min_saturation: int = 45
@@ -28,6 +28,7 @@ class DetectorConfig:
     gauge_min_aspect: float = 2.4
     gauge_min_width_button_radius: float = 2.2
     gauge_min_color_pixels: int = 80
+    gauge_min_state_score: float = 0.72
     quality_min_pixels: int = 180
     result_dark_luma: float = 112.0
     result_yellow_ratio: float = 0.010
@@ -44,13 +45,53 @@ class StateMachineConfig:
 
 @dataclass
 class ActionConfig:
-    tap_hold_ms: int = 80
+    # Zero lets Android deliver an input tap immediately.  A positive value
+    # uses a same-point swipe and is intentionally opt-in for slower devices.
+    tap_hold_ms: int = 0
+    auto_start: bool = False
     qte_enabled: bool = False
     auto_continue: bool = False
     min_confidence: float = 0.68
     min_action_interval_s: float = 0.45
     qte_min_interval_s: float = 0.18
     qte_target_margin: float = 0.05
+    # Estimated time from the analysed frame to the Android touch event.
+    # The planner predicts marker motion over this horizon instead of waiting
+    # for the marker to visibly enter the target range.
+    qte_input_latency_s: float = 0.18
+    qte_latency_sample_window: int = 5
+    qte_velocity_samples: int = 3
+    qte_min_velocity_norm_s: float = 0.12
+    # Some reward animations require one additional screen tap after the
+    # detected continue/dismiss control has been pressed.
+    result_extra_tap_enabled: bool = True
+    result_extra_tap_delay_s: float = 0.85
+
+
+@dataclass
+class AutomationConfig:
+    """Fail-safe stage timeouts used by the explicit full-auto runner."""
+
+    unknown_timeout_s: float = 8.0
+    waiting_timeout_s: float = 30.0
+    unconfirmed_waiting_timeout_s: float = 8.0
+    prompt_timeout_s: float = 12.0
+    casting_timeout_s: float = 12.0
+    qte_timeout_s: float = 35.0
+    quality_timeout_s: float = 10.0
+    result_timeout_s: float = 12.0
+    # Foreground checks are intentionally periodic: a dumpsys call before
+    # every QTE tap adds avoidable input latency.
+    foreground_check_interval_s: float = 0.75
+
+
+@dataclass
+class ScrcpyConfig:
+    max_size: int = 0
+    max_fps: int = 30
+    video_bit_rate: int = 8_000_000
+    connect_timeout_s: float = 10.0
+    frame_timeout_s: float = 3.0
 
 
 @dataclass
@@ -58,7 +99,10 @@ class AppConfig:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     state_machine: StateMachineConfig = field(default_factory=StateMachineConfig)
     action: ActionConfig = field(default_factory=ActionConfig)
+    automation: AutomationConfig = field(default_factory=AutomationConfig)
+    scrcpy: ScrcpyConfig = field(default_factory=ScrcpyConfig)
     capture_fps: float = 10.0
+    qte_capture_fps: float = 30.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -88,6 +132,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     _update_dataclass(config.detector, data.get("detector", {}))
     _update_dataclass(config.state_machine, data.get("state_machine", {}))
     _update_dataclass(config.action, data.get("action", {}))
+    _update_dataclass(config.automation, data.get("automation", {}))
+    _update_dataclass(config.scrcpy, data.get("scrcpy", {}))
     if "capture_fps" in data:
         config.capture_fps = float(data["capture_fps"])
+    if "qte_capture_fps" in data:
+        config.qte_capture_fps = float(data["qte_capture_fps"])
     return config
