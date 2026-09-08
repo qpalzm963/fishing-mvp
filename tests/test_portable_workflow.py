@@ -43,13 +43,17 @@ def test_smoke_tests_target_the_assembled_portable_directory() -> None:
 
     assert "& $exe.FullName --help" in workflow
     assert "$PSNativeCommandUseErrorActionPreference = $false" in workflow
+    assert "Start-Process -FilePath $exe.FullName" in workflow
+    assert "-RedirectStandardOutput $discoverStdoutPath" in workflow
+    assert "-RedirectStandardError $discoverStderrPath" in workflow
     for runtime_file in ("scrcpy.exe", "adb.exe", "scrcpy-server", "AdbWinApi.dll", "AdbWinUsbApi.dll"):
         assert runtime_file in workflow
     assert "runtime-manifest.json" in workflow
     assert "scrcpy_version -ne '4.1'" in workflow
     assert "runtime-smoke" in workflow
     assert "config_loaded" in workflow
-    assert "discover-device --adb-path" in workflow
+    assert "'discover-device'" in workflow
+    assert "'--adb-path'" in workflow
     assert "no_devices" in workflow
     assert "PyAV files were not found in the frozen portable package" in workflow
     assert "Compress-Archive" in workflow
