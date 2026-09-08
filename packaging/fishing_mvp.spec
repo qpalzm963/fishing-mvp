@@ -28,22 +28,33 @@ for required_file in (CONFIG_FILE, PACKAGE_DEFAULT_FILE):
 runtime_hook_path = os.environ.get("FISHING_MVP_RUNTIME_HOOK")
 runtime_hooks = [runtime_hook_path] if runtime_hook_path else []
 
-# PyAV is imported lazily by the scrcpy frame source, so PyInstaller cannot
-# discover every decoder module from the normal import graph on its own.
-# The build script installs the optional [scrcpy] extra before this spec runs.
+# NumPy/OpenCV and PyAV contain native extensions and lazy-loaded modules.
+# PyInstaller cannot discover every required module from the normal import
+# graph on its own, especially for newer NumPy package layouts. The build
+# script installs these dependencies before this spec runs.
+NUMPY_DATA_FILES, NUMPY_BINARIES, NUMPY_HIDDEN_IMPORTS = collect_all("numpy")
+CV2_DATA_FILES, CV2_BINARIES, CV2_HIDDEN_IMPORTS = collect_all("cv2")
 AV_DATA_FILES, AV_BINARIES, AV_HIDDEN_IMPORTS = collect_all("av")
 
 
 analysis = Analysis(
     [str(SOURCE_ROOT / "fishing_mvp" / "__main__.py")],
     pathex=[str(SOURCE_ROOT)],
-    binaries=AV_BINARIES,
+    binaries=[*NUMPY_BINARIES, *CV2_BINARIES, *AV_BINARIES],
     datas=[
         (str(CONFIG_FILE), "config"),
         (str(PACKAGE_DEFAULT_FILE), "fishing_mvp/defaults"),
+        *NUMPY_DATA_FILES,
+        *CV2_DATA_FILES,
         *AV_DATA_FILES,
     ],
-    hiddenimports=["av", *AV_HIDDEN_IMPORTS],
+    hiddenimports=[
+        "av",
+        "numpy._core._exceptions",
+        *NUMPY_HIDDEN_IMPORTS,
+        *CV2_HIDDEN_IMPORTS,
+        *AV_HIDDEN_IMPORTS,
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=runtime_hooks,

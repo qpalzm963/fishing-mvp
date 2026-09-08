@@ -17,6 +17,9 @@ def test_build_contract_copies_operator_launchers_and_uses_the_frozen_name():
     assert "Copy-Item -LiteralPath $launcherPath" in script
     assert 'name="FishingMVP"' in spec
     assert 'PACKAGE_DEFAULT_FILE = SOURCE_ROOT / "fishing_mvp" / "defaults" / "default.yaml"' in spec
+    assert 'collect_all("numpy")' in spec
+    assert 'collect_all("cv2")' in spec
+    assert '"numpy._core._exceptions"' in spec
     assert "if __package__" in entrypoint
     assert "from fishing_mvp.cli import main" in entrypoint
     assert 'sys.exit(\'Python 3.10 or newer is required\')' in script
