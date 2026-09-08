@@ -42,6 +42,7 @@ def test_smoke_tests_target_the_assembled_portable_directory() -> None:
     workflow = workflow_text()
 
     assert "& $exe.FullName --help" in workflow
+    assert "$PSNativeCommandUseErrorActionPreference = $false" in workflow
     for runtime_file in ("scrcpy.exe", "adb.exe", "scrcpy-server", "AdbWinApi.dll", "AdbWinUsbApi.dll"):
         assert runtime_file in workflow
     assert "runtime-manifest.json" in workflow

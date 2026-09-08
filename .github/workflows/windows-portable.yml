@@ -109,6 +109,12 @@ jobs:
           PACKAGE_ROOT: ${{ steps.package.outputs.package_root }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # Keep non-zero native exit codes observable. The frozen
+          # discover-device contract deliberately returns exit code 2 when no
+          # Android device is attached, and PowerShell 7 can otherwise turn
+          # that expected result into a terminating error before LASTEXITCODE
+          # and stdout are inspected.
+          $PSNativeCommandUseErrorActionPreference = $false
           $root = (Resolve-Path -LiteralPath $env:PACKAGE_ROOT).Path
           $exe = Get-ChildItem -LiteralPath $root -Filter 'FishingMVP.exe' -File -Recurse | Select-Object -First 1
           if ($null -eq $exe) {
