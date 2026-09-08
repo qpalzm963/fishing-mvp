@@ -26,6 +26,19 @@ class ActionType(str, Enum):
 
 
 @dataclass(frozen=True)
+class FrameMetadata:
+    """Capture timing attached to a frame delivered to the detector."""
+
+    source_mode: str
+    frame_index: int
+    frame_pts_us: int | None = None
+    packet_received_at_monotonic: float | None = None
+    decoded_at_monotonic: float | None = None
+    read_at_monotonic: float | None = None
+    reused: bool = False
+
+
+@dataclass(frozen=True)
 class Box:
     """A pixel-space rectangle."""
 
@@ -84,6 +97,14 @@ class Detection:
     water_activity: float = 0.0
     hint: FishingState = FishingState.UNKNOWN
     confidence: float = 0.0
+    source_mode: str | None = None
+    frame_pts_us: int | None = None
+    frame_received_s: float | None = None
+    frame_decoded_s: float | None = None
+    frame_read_s: float | None = None
+    frame_reused: bool | None = None
+    frame_age_s: float | None = None
+    analysis_duration_s: float | None = None
     features: dict[str, Any] = field(default_factory=dict)
 
     def normalized_point(self, box: Box | None = None) -> tuple[float, float] | None:
@@ -115,6 +136,14 @@ class Detection:
             "water_activity": round(self.water_activity, 4),
             "hint": self.hint.value,
             "confidence": round(self.confidence, 4),
+            "source_mode": self.source_mode,
+            "frame_pts_us": self.frame_pts_us,
+            "frame_received_s": round(self.frame_received_s, 4) if self.frame_received_s is not None else None,
+            "frame_decoded_s": round(self.frame_decoded_s, 4) if self.frame_decoded_s is not None else None,
+            "frame_read_s": round(self.frame_read_s, 4) if self.frame_read_s is not None else None,
+            "frame_reused": self.frame_reused,
+            "frame_age_s": round(self.frame_age_s, 4) if self.frame_age_s is not None else None,
+            "analysis_duration_s": round(self.analysis_duration_s, 4) if self.analysis_duration_s is not None else None,
             "features": self.features,
         }
         return result

@@ -4,10 +4,24 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from enum import Enum
+import math
 from statistics import median
 
 from .config import ActionConfig, AutomationConfig, StateMachineConfig
 from .models import Action, ActionType, Detection, FishingState, StateTransition
+
+
+class AutomationPhase(str, Enum):
+    """Coarse automation phases used for fail-safe timeout tracking."""
+
+    UNKNOWN = "unknown"
+    WAITING = "waiting"
+    PROMPT = "prompt"
+    CASTING = "casting"
+    FISHING_QTE = "fishing_qte"
+    RESULT = "result"
+    ERROR = "error"
 
 
 class FishingStateMachine:
@@ -93,6 +107,7 @@ class ActionPlanner:
     qte_in_target: bool = False
     qte_seen_inside: bool = False
     qte_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=8))
+    dispatch_latency_samples: dict[str, deque[float]] = field(default_factory=dict)
     result_handled: bool = False
     result_extra_tap_handled: bool = False
 
@@ -223,6 +238,28 @@ class ActionPlanner:
             )
         return None
 
+    def record_input_dispatch(self, source_mode: str, latency_s: float) -> None:
+        """Keep separate moving latency estimates for scrcpy and ADB paths."""
+
+        if not math.isfinite(latency_s) or latency_s < 0:
+            return
+        key = "adb" if source_mode.startswith("adb") else "scrcpy" if source_mode.startswith("scrcpy") else source_mode
+        window = max(1, int(self.config.qte_latency_sample_window))
+        samples = self.dispatch_latency_samples.get(key)
+        if samples is None or samples.maxlen != window:
+            samples = deque(samples or (), maxlen=window)
+            self.dispatch_latency_samples[key] = samples
+        samples.append(float(latency_s))
+
+    def latency_estimates(self) -> dict[str, float]:
+        """Return moving median dispatch latency by input transport."""
+
+        return {
+            source: round(float(median(samples)) * 1000.0, 2)
+            for source, samples in self.dispatch_latency_samples.items()
+            if samples
+        }
+
     def _marker_in_target(self, marker: float, target: tuple[float, float]) -> bool:
         margin = max(0.0, self.config.qte_target_margin)
         return target[0] - margin <= marker <= target[1] + margin
@@ -248,11 +285,30 @@ class ActionPlanner:
             if 0.01 <= delta_t <= 1.5:
                 velocities.append((x1 - x0) / delta_t)
         velocity = float(median(velocities)) if velocities else None
-        horizon = max(0.0, self.config.qte_input_latency_s) + max(0, self.config.tap_hold_ms) / 1000.0
+        dispatch_latency = self._dispatch_latency_for(detection.source_mode)
+        frame_age = detection.frame_age_s if detection.frame_age_s is not None and math.isfinite(detection.frame_age_s) else 0.0
+        analysis_duration = (
+            detection.analysis_duration_s
+            if detection.analysis_duration_s is not None and math.isfinite(detection.analysis_duration_s)
+            else 0.0
+        )
+        horizon = (
+            max(0.0, frame_age)
+            + max(0.0, analysis_duration)
+            + dispatch_latency
+            + max(0, self.config.tap_hold_ms) / 1000.0
+        )
         if velocity is None or abs(velocity) < max(0.0, self.config.qte_min_velocity_norm_s):
             return None, velocity, horizon
         predicted = float(min(1.0, max(0.0, marker + velocity * horizon)))
         return predicted, velocity, horizon
+
+    def _dispatch_latency_for(self, source_mode: str | None) -> float:
+        key = "adb" if source_mode and source_mode.startswith("adb") else "scrcpy" if source_mode and source_mode.startswith("scrcpy") else source_mode or "unknown"
+        samples = self.dispatch_latency_samples.get(key)
+        if samples:
+            return max(0.0, float(median(samples)))
+        return max(0.0, self.config.qte_input_latency_s)
 
     @staticmethod
     def _allowed(timestamp: float, last: float, interval: float) -> bool:
@@ -278,7 +334,8 @@ class AutomationProgress:
     max_rounds: int = 1
     completed_rounds: int = 0
     current_state: FishingState = FishingState.UNKNOWN
-    state_started_timestamp_s: float | None = None
+    current_phase: AutomationPhase = AutomationPhase.UNKNOWN
+    phase_started_timestamp_s: float | None = None
     result_seen: bool = False
     round_active: bool = False
     start_allowed: bool = True
@@ -288,15 +345,23 @@ class AutomationProgress:
         if self.max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
 
+    @property
+    def state_started_timestamp_s(self) -> float | None:
+        """Compatibility alias for callers that only read the timer."""
+
+        return self.phase_started_timestamp_s
+
     def observe(
         self,
         state: FishingState,
         timestamp_s: float,
         transition: StateTransition | None = None,
     ) -> str | None:
-        if self.state_started_timestamp_s is None or state != self.current_state:
-            self.current_state = state
-            self.state_started_timestamp_s = timestamp_s
+        phase = self._phase_for_state(state)
+        if self.phase_started_timestamp_s is None or phase != self.current_phase:
+            self.current_phase = phase
+            self.phase_started_timestamp_s = timestamp_s
+        self.current_state = state
 
         if state == FishingState.RESULT:
             self.result_seen = True
@@ -323,17 +388,34 @@ class AutomationProgress:
         return self.stop_reason
 
     def timed_out(self, timestamp_s: float, config: AutomationConfig) -> bool:
-        if self.stop_reason is not None or self.state_started_timestamp_s is None:
+        if self.stop_reason is not None or self.phase_started_timestamp_s is None:
             return False
         timeout = {
-            FishingState.UNKNOWN: config.unknown_timeout_s,
-            FishingState.WAITING: config.unconfirmed_waiting_timeout_s if self.round_active else config.waiting_timeout_s,
-            FishingState.PROMPT: config.prompt_timeout_s,
-            FishingState.CASTING: config.casting_timeout_s,
-            FishingState.QTE: config.qte_timeout_s,
-            FishingState.QUALITY: config.quality_timeout_s,
-            FishingState.RESULT: config.result_timeout_s,
-        }.get(self.current_state)
+            AutomationPhase.UNKNOWN: config.unknown_timeout_s,
+            AutomationPhase.WAITING: config.unconfirmed_waiting_timeout_s
+            if self.round_active
+            else config.waiting_timeout_s,
+            AutomationPhase.PROMPT: config.prompt_timeout_s,
+            AutomationPhase.CASTING: config.casting_timeout_s,
+            # QTE and QUALITY are one continuous fishing phase.  Use the
+            # larger existing limit so sharing the timer never shortens the
+            # previous QTE allowance.
+            AutomationPhase.FISHING_QTE: max(config.qte_timeout_s, config.quality_timeout_s),
+            AutomationPhase.RESULT: config.result_timeout_s,
+        }.get(self.current_phase)
         if timeout is None:
             return False
-        return timestamp_s - self.state_started_timestamp_s >= max(0.0, timeout)
+        return timestamp_s - self.phase_started_timestamp_s >= max(0.0, timeout)
+
+    @staticmethod
+    def _phase_for_state(state: FishingState) -> AutomationPhase:
+        return {
+            FishingState.UNKNOWN: AutomationPhase.UNKNOWN,
+            FishingState.WAITING: AutomationPhase.WAITING,
+            FishingState.PROMPT: AutomationPhase.PROMPT,
+            FishingState.CASTING: AutomationPhase.CASTING,
+            FishingState.QTE: AutomationPhase.FISHING_QTE,
+            FishingState.QUALITY: AutomationPhase.FISHING_QTE,
+            FishingState.RESULT: AutomationPhase.RESULT,
+            FishingState.ERROR: AutomationPhase.ERROR,
+        }[state]

@@ -238,6 +238,72 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
     }
 
 
+def detect_action_button_nearby(
+    frame: np.ndarray,
+    previous: Box,
+    config: DetectorConfig,
+) -> tuple[Box | None, bool, float, dict[str, float]]:
+    """Track a previously detected button through a small local ROI.
+
+    QTE frames arrive at a higher cadence than idle frames.  Re-running the
+    full-frame Hough search for every QTE frame adds avoidable latency, while
+    the action control itself normally remains stable.  This fast path still
+    verifies the circle from the current pixels and falls back to the full
+    detector when the local track is not convincing.
+    """
+
+    height, width = frame.shape[:2]
+    previous_radius = max(8.0, min(previous.w, previous.h) / 2.0)
+    expand = previous_radius * 1.45
+    roi = _clip_box(
+        previous.cx - expand,
+        previous.cy - expand,
+        expand * 2.0,
+        expand * 2.0,
+        width,
+        height,
+    )
+    crop = _crop(frame, roi)
+    if crop.size == 0:
+        return None, False, 0.0, {"purple_ratio": 0.0, "saturation": 0.0}
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (7, 7), 1.5)
+    circles = cv2.HoughCircles(
+        blurred,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=max(8, int(previous_radius * 0.85)),
+        param1=70,
+        param2=22,
+        minRadius=max(8, int(previous_radius * 0.62)),
+        maxRadius=max(9, int(previous_radius * 1.38)),
+    )
+    if circles is None:
+        return None, False, 0.0, {"purple_ratio": 0.0, "saturation": 0.0}
+    candidates: list[_ButtonCandidate] = []
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    for raw_cx, raw_cy, raw_radius in np.round(circles[0]).astype(int):
+        cx = raw_cx + roi.x
+        cy = raw_cy + roi.y
+        radius = float(raw_radius)
+        if abs(cx - previous.cx) > previous_radius * 0.70 or abs(cy - previous.cy) > previous_radius * 0.70:
+            continue
+        purple_ratio, sat = _button_colour_metrics(hsv, cx, cy, radius, config)
+        score = _score_button(width, height, cx, cy, radius, purple_ratio, sat)
+        box = _clip_box(cx - radius, cy - radius, radius * 2, radius * 2, width, height)
+        candidates.append(_ButtonCandidate(box, radius, score, purple_ratio, sat))
+    if not candidates:
+        return None, False, 0.0, {"purple_ratio": 0.0, "saturation": 0.0}
+    best = min(candidates, key=lambda candidate: abs(candidate.box.cx - previous.cx) + abs(candidate.box.cy - previous.cy))
+    active_score = min(1.0, best.purple_ratio / 0.30) * 0.72 + min(1.0, best.mean_saturation / 150.0) * 0.28
+    active = best.purple_ratio >= config.button_active_purple_ratio or best.mean_saturation >= config.button_active_saturation
+    return best.box, bool(active), float(best.score), {
+        "purple_ratio": round(best.purple_ratio, 4),
+        "saturation": round(best.mean_saturation, 2),
+        "active_score": round(active_score, 4),
+    }
+
+
 def _relative_roi(
     center_x: float,
     top: float,
@@ -577,6 +643,8 @@ class FrameAnalyzer:
     def __init__(self, config: DetectorConfig):
         self.config = config
         self.previous_gray: np.ndarray | None = None
+        self.previous_button_work: Box | None = None
+        self.previous_work_size: tuple[int, int] | None = None
 
     def _water_activity(self, gray: np.ndarray, button: Box | None) -> float:
         small = cv2.resize(gray, (160, max(80, int(round(gray.shape[0] * 160 / gray.shape[1])))), interpolation=cv2.INTER_AREA)
@@ -595,12 +663,23 @@ class FrameAnalyzer:
             return 0.0
         return float(np.mean(roi >= self.config.motion_threshold))
 
-    def analyze(self, frame: np.ndarray, frame_index: int, timestamp_s: float) -> Detection:
+    def analyze(self, frame: np.ndarray, frame_index: int, timestamp_s: float, *, fast: bool = False) -> Detection:
         height, width = frame.shape[:2]
         work, scale = _prepare_frame(frame, self.config.max_work_width)
         work_h, work_w = work.shape[:2]
         gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-        work_button, active, button_score, button_features = detect_action_button(work, self.config)
+        if fast and self.previous_button_work is not None and self.previous_work_size == (work_w, work_h):
+            work_button, active, button_score, button_features = detect_action_button_nearby(
+                work,
+                self.previous_button_work,
+                self.config,
+            )
+            if work_button is None:
+                work_button, active, button_score, button_features = detect_action_button(work, self.config)
+        else:
+            work_button, active, button_score, button_features = detect_action_button(work, self.config)
+        self.previous_button_work = work_button
+        self.previous_work_size = (work_w, work_h)
         work_prompt, prompt_score = detect_prompt(work, work_button, self.config)
         work_gauge, gauge_score, marker_x, target_range = detect_gauge(work, work_button, self.config)
         prompt_progress = _overlap_ratio(work_prompt, work_gauge) >= 0.30

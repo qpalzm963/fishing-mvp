@@ -26,6 +26,8 @@ from typing import Any, TextIO
 import numpy as np
 
 from .actions import ADBController, ADBError
+from .models import Action, ActionType, FrameMetadata
+from .scrcpy_control import SCRCPY_CONTROL_PROTOCOL_VERSION, ScrcpyControlClient, ScrcpyControlError
 
 
 REMOTE_SERVER_PATH = "/data/local/tmp/fishing-mvp-scrcpy-server.jar"
@@ -224,6 +226,8 @@ class ScrcpyFrameSource:
         self.installation: ScrcpyInstallation | None = None
         self.server_process: subprocess.Popen[str] | None = None
         self.video_socket: socket.socket | None = None
+        self.control_socket: socket.socket | None = None
+        self.control_client: ScrcpyControlClient | None = None
         self.listen_socket: socket.socket | None = None
         self.tunnel_mode: str | None = None
         self.last_tunnel_mode: str | None = None
@@ -235,6 +239,9 @@ class ScrcpyFrameSource:
         self.frame_condition = threading.Condition()
         self.reader_error: Exception | None = None
         self.latest_frame: np.ndarray | None = None
+        self.latest_frame_metadata: FrameMetadata | None = None
+        self.last_frame_metadata: FrameMetadata | None = None
+        self._last_read_frame_index: int | None = None
         self.frame_counter = 0
         self.device_name: str | None = None
         self.codec_name: str | None = None
@@ -256,9 +263,19 @@ class ScrcpyFrameSource:
             return
         self.controller.assert_connected()
         self.installation = discover_scrcpy()
+        if self.installation.version != SCRCPY_CONTROL_PROTOCOL_VERSION:
+            raise ScrcpyError(
+                "scrcpy control input is version-pinned to "
+                f"{SCRCPY_CONTROL_PROTOCOL_VERSION}; found {self.installation.version}"
+            )
         self.stop_event.clear()
         self.reader_error = None
         self.latest_frame = None
+        self.latest_frame_metadata = None
+        self.last_frame_metadata = None
+        self._last_read_frame_index = None
+        self.control_client = None
+        self.control_socket = None
         self.frame_counter = 0
         self.server_logs.clear()
 
@@ -282,6 +299,24 @@ class ScrcpyFrameSource:
     def close(self) -> None:
         self._cleanup_runtime(remove_tunnel=True)
 
+    def send_action(self, action: Action, device_size: tuple[int, int]) -> str:
+        """Send a supported live action through scrcpy's control socket."""
+
+        if action.action_type == ActionType.NONE:
+            return "none"
+        if action.action_type != ActionType.TAP or action.hold_ms > 0:
+            raise ScrcpyError("scrcpy control integration currently supports zero-hold TAP actions only")
+        if action.x is None or action.y is None:
+            raise ScrcpyError("scrcpy control action has no pixel coordinate")
+        client = self.control_client
+        if client is None or client.closed:
+            raise ScrcpyError("scrcpy control socket is not available")
+        try:
+            client.tap_pixels(action.x, action.y, framebuffer_size=device_size)
+        except ScrcpyControlError as exc:
+            raise ScrcpyError(f"scrcpy control input failed: {exc}") from exc
+        return "scrcpy_control"
+
     def read(self) -> np.ndarray:
         deadline = time.monotonic() + self.frame_timeout_s
         with self.frame_condition:
@@ -301,12 +336,27 @@ class ScrcpyFrameSource:
             # scrcpy is change-driven: static screens may produce no new
             # packet for several seconds. Reuse the latest frame at the
             # detector's sampling rate instead of treating that as a timeout.
-            return self.latest_frame.copy()
+            frame = self.latest_frame.copy()
+            metadata = self.latest_frame_metadata
+            if metadata is not None:
+                read_at = time.monotonic()
+                self.last_frame_metadata = FrameMetadata(
+                    source_mode=metadata.source_mode,
+                    frame_index=metadata.frame_index,
+                    frame_pts_us=metadata.frame_pts_us,
+                    packet_received_at_monotonic=metadata.packet_received_at_monotonic,
+                    decoded_at_monotonic=metadata.decoded_at_monotonic,
+                    read_at_monotonic=read_at,
+                    reused=metadata.frame_index == self._last_read_frame_index,
+                )
+                self._last_read_frame_index = metadata.frame_index
+            return frame
 
     def info(self) -> dict[str, object]:
         with self.frame_condition:
             frames_decoded = self.frame_counter
             latest = self.latest_frame
+            latest_metadata = self.latest_frame_metadata
         elapsed = max(0.0, time.monotonic() - self.started_at) if self.started_at is not None else 0.0
         width = latest.shape[1] if latest is not None else self.frame_width
         height = latest.shape[0] if latest is not None else self.frame_height
@@ -319,6 +369,10 @@ class ScrcpyFrameSource:
             "frames_decoded": frames_decoded,
             "decoded_fps": round(frames_decoded / elapsed, 2) if elapsed > 0 else 0.0,
             "tunnel": self.tunnel_mode or self.last_tunnel_mode,
+            "latest_frame_pts_us": latest_metadata.frame_pts_us if latest_metadata else None,
+            "latest_frame_age_ms": round((time.monotonic() - latest_metadata.decoded_at_monotonic) * 1000.0, 2)
+            if latest_metadata and latest_metadata.decoded_at_monotonic is not None
+            else None,
         }
 
     def _start_with_mode(self, mode: str) -> None:
@@ -339,9 +393,13 @@ class ScrcpyFrameSource:
             self.video_socket = self._connect_forward_socket()
             if _read_exact(self.video_socket, 1) != b"\x00":
                 raise ScrcpyError("invalid scrcpy forward-tunnel handshake")
+            self.control_socket = self._connect_forward_socket()
         else:
             self.video_socket = self._accept_reverse_socket()
+            self.control_socket = self._accept_reverse_socket()
         self.video_socket.settimeout(None)
+        self.control_socket.settimeout(None)
+        self.control_client = ScrcpyControlClient(self.control_socket)
         self.device_name = _read_device_name(self.video_socket)
         self.codec_name, self.frame_width, self.frame_height = _read_codec_meta(self.video_socket)
         self.decoder = self._create_decoder(self.codec_name)
@@ -357,7 +415,7 @@ class ScrcpyFrameSource:
             "log_level=warn",
             "video=true",
             "audio=false",
-            "control=false",
+            "control=true",
             "video_codec=h264",
             f"max_size={self.max_size}",
             f"max_fps={self.max_fps}",
@@ -399,6 +457,7 @@ class ScrcpyFrameSource:
         try:
             while not self.stop_event.is_set():
                 payload, pts, is_config, session_size = _read_video_packet(self.video_socket)
+                packet_received_at = time.monotonic()
                 if session_size is not None:
                     self.frame_width, self.frame_height = session_size
                     self.decoder = self._create_decoder(self.codec_name or "")
@@ -418,8 +477,16 @@ class ScrcpyFrameSource:
                     packet.dts = pts
                 for decoded in self.decoder.decode(packet):
                     image = decoded.to_ndarray(format="bgr24")
+                    decoded_at = time.monotonic()
                     with self.frame_condition:
                         self.latest_frame = image
+                        self.latest_frame_metadata = FrameMetadata(
+                            source_mode="scrcpy",
+                            frame_index=self.frame_counter,
+                            frame_pts_us=pts,
+                            packet_received_at_monotonic=packet_received_at,
+                            decoded_at_monotonic=decoded_at,
+                        )
                         self.frame_counter += 1
                         self.frame_condition.notify_all()
         except (EOFError, OSError) as exc:
@@ -479,7 +546,9 @@ class ScrcpyFrameSource:
         self.stop_event.set()
         with self.frame_condition:
             self.frame_condition.notify_all()
-        for sock in (self.video_socket, self.listen_socket):
+        if self.control_client is not None:
+            self.control_client.close()
+        for sock in (self.video_socket, self.control_socket, self.listen_socket):
             if sock is None:
                 continue
             try:
@@ -491,6 +560,8 @@ class ScrcpyFrameSource:
             except OSError:
                 pass
         self.video_socket = None
+        self.control_socket = None
+        self.control_client = None
         self.listen_socket = None
 
         process = self.server_process

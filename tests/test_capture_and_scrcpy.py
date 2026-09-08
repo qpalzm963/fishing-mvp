@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cv2
 import socket
 from types import SimpleNamespace
 
@@ -7,8 +8,11 @@ import numpy as np
 
 from fishing_mvp.actions import ADBController
 from fishing_mvp.capture import ADBFrameSource, create_live_frame_source
-from fishing_mvp.live import _map_action_to_device
+from fishing_mvp.config import AppConfig
+from fishing_mvp.live import _capture_fps_for_state, _map_action_to_device, _send_live_action
 from fishing_mvp.models import Action, ActionType
+from fishing_mvp.models import FishingState
+from fishing_mvp.scrcpy_control import ScrcpyControlClient, TOUCH_EVENT_SIZE
 from fishing_mvp.scrcpy_stream import (
     CODEC_ID,
     H264_CODEC_ID,
@@ -68,6 +72,62 @@ def test_adb_frame_source_is_explicit_fallback():
     assert isinstance(source, ADBFrameSource)
     assert note is None
     source.close()
+
+
+def test_adb_frame_source_records_capture_metadata():
+    ok, encoded = cv2.imencode(".png", np.full((3, 2, 3), 21, dtype=np.uint8))
+    assert ok
+    controller = SimpleNamespace(screenshot_png=lambda: encoded.tobytes())
+    source = ADBFrameSource(controller)  # type: ignore[arg-type]
+
+    frame = source.read()
+
+    assert frame.shape == (3, 2, 3)
+    assert source.last_frame_metadata is not None
+    assert source.last_frame_metadata.source_mode == "adb"
+    assert source.last_frame_metadata.frame_index == 0
+    assert source.last_frame_metadata.decoded_at_monotonic is not None
+    assert source.last_frame_metadata.read_at_monotonic is not None
+
+
+def test_live_sampling_uses_fast_qte_cadence_only_for_fishing_phase():
+    config = AppConfig(capture_fps=10.0, qte_capture_fps=30.0)
+
+    assert _capture_fps_for_state(FishingState.WAITING, config) == 10.0
+    assert _capture_fps_for_state(FishingState.PROMPT, config) == 10.0
+    assert _capture_fps_for_state(FishingState.QTE, config) == 30.0
+    assert _capture_fps_for_state(FishingState.QUALITY, config) == 30.0
+
+
+def test_live_action_prefers_source_control_socket_for_zero_hold_tap():
+    calls: list[tuple[Action, tuple[int, int]]] = []
+
+    class Source:
+        def send_action(self, action, device_size):
+            calls.append((action, device_size))
+            return "scrcpy_control"
+
+    class Controller:
+        def execute(self, action):
+            raise AssertionError("ADB input should not be used when scrcpy control is available")
+
+    action = Action(ActionType.TAP, x=10, y=20)
+    assert _send_live_action(Source(), Controller(), action, (1080, 2340)) == "scrcpy_control"  # type: ignore[arg-type]
+    assert calls == [(action, (1080, 2340))]
+
+
+def test_scrcpy_frame_source_sends_tap_through_control_client():
+    client_socket, peer_socket = socket.socketpair()
+    source = ScrcpyFrameSource(ADBController("serial"))
+    source.control_client = ScrcpyControlClient(client_socket)
+    try:
+        action = Action(ActionType.TAP, x=4, y=5)
+        assert source.send_action(action, (10, 20)) == "scrcpy_control"
+        payload = peer_socket.recv(2 * TOUCH_EVENT_SIZE)
+        assert len(payload) == 2 * TOUCH_EVENT_SIZE
+    finally:
+        source.close()
+        peer_socket.close()
 
 
 def test_foreground_package_parser_uses_current_window_output():

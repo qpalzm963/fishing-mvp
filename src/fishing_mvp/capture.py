@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from .actions import ADBController, ADBError
+from .models import FrameMetadata
 from .scrcpy_stream import ScrcpyError, ScrcpyFrameSource, scrcpy_status
 
 
@@ -54,13 +55,23 @@ class ADBFrameSource:
         self.fps = max(0.5, fps)
         self.frame_count = 0
         self.started_at = time.monotonic()
+        self.last_frame_metadata: FrameMetadata | None = None
 
     def read(self) -> np.ndarray:
+        capture_started = time.monotonic()
         png = self.controller.screenshot_png()
         image = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise RuntimeError("ADB returned an unreadable PNG screenshot")
+        decoded_at = time.monotonic()
         self.frame_count += 1
+        self.last_frame_metadata = FrameMetadata(
+            source_mode="adb",
+            frame_index=self.frame_count - 1,
+            packet_received_at_monotonic=capture_started,
+            decoded_at_monotonic=decoded_at,
+            read_at_monotonic=time.monotonic(),
+        )
         return image
 
     def close(self) -> None:

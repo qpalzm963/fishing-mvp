@@ -12,7 +12,7 @@ from .actions import ADBController
 from .capture import LiveFrameSource, create_live_frame_source, scrcpy_status
 from .config import AppConfig
 from .debug import draw_overlay, save_snapshot
-from .models import Action
+from .models import Action, Detection, FishingState, FrameMetadata
 from .state_machine import ActionPlanner, AutomationProgress, FishingStateMachine
 from .vision import FrameAnalyzer
 
@@ -45,6 +45,80 @@ def _map_action_to_device(
         x=min(device_width - 1, max(0, round(action.x_norm * device_width))),
         y=min(device_height - 1, max(0, round(action.y_norm * device_height))),
     )
+
+
+def _capture_fps_for_state(state: FishingState, config: AppConfig) -> float:
+    """Use a faster decision cadence only while the QTE UI is active."""
+
+    if state in {FishingState.QTE, FishingState.QUALITY}:
+        return max(0.5, float(config.qte_capture_fps))
+    return max(0.5, float(config.capture_fps))
+
+
+def _annotate_frame_timing(
+    detection: Detection,
+    metadata: FrameMetadata | None,
+    *,
+    start_monotonic: float,
+    analysis_started_at: float,
+    analysis_finished_at: float,
+) -> None:
+    """Copy source timing into the detection used by prediction and logs."""
+
+    detection.analysis_duration_s = max(0.0, analysis_finished_at - analysis_started_at)
+    if metadata is None:
+        return
+    detection.source_mode = metadata.source_mode
+    detection.frame_pts_us = metadata.frame_pts_us
+    if metadata.packet_received_at_monotonic is not None:
+        detection.frame_received_s = max(0.0, metadata.packet_received_at_monotonic - start_monotonic)
+    if metadata.decoded_at_monotonic is not None:
+        detection.frame_decoded_s = max(0.0, metadata.decoded_at_monotonic - start_monotonic)
+        detection.frame_age_s = max(0.0, analysis_started_at - metadata.decoded_at_monotonic)
+    if metadata.read_at_monotonic is not None:
+        detection.frame_read_s = max(0.0, metadata.read_at_monotonic - start_monotonic)
+    detection.frame_reused = metadata.reused
+
+
+def _metadata_from_source(source: LiveFrameSource) -> FrameMetadata | None:
+    metadata = getattr(source, "last_frame_metadata", None)
+    return metadata if isinstance(metadata, FrameMetadata) else None
+
+
+def _send_live_action(
+    source: LiveFrameSource,
+    controller: ADBController,
+    action: Action,
+    device_size: tuple[int, int],
+) -> str:
+    """Prefer the source's low-latency control path when it provides one."""
+
+    source_sender = getattr(source, "send_action", None)
+    if callable(source_sender) and action.action_type.value == "tap" and action.hold_ms <= 0:
+        return str(source_sender(action, device_size))
+    controller.execute(action)
+    return "adb_shell"
+
+
+def _timing_record(
+    detection: Detection,
+    *,
+    analysis_started_at: float,
+    analysis_finished_at: float,
+    start_monotonic: float,
+) -> dict[str, Any]:
+    return {
+        "analysis_start_s": round(max(0.0, analysis_started_at - start_monotonic), 4),
+        "analysis_end_s": round(max(0.0, analysis_finished_at - start_monotonic), 4),
+        "analysis_ms": round((analysis_finished_at - analysis_started_at) * 1000.0, 2),
+        "source_mode": detection.source_mode,
+        "frame_pts_us": detection.frame_pts_us,
+        "frame_received_s": detection.frame_received_s,
+        "frame_decoded_s": detection.frame_decoded_s,
+        "frame_read_s": detection.frame_read_s,
+        "frame_reused": detection.frame_reused,
+        "frame_age_ms": round(detection.frame_age_s * 1000.0, 2) if detection.frame_age_s is not None else None,
+    }
 
 
 def run_live(
@@ -94,12 +168,15 @@ def run_live(
     automation = AutomationProgress(max_rounds=target_rounds or 1) if full_auto else None
     start = time.monotonic()
     next_frame = start
+    sampling_state = FishingState.UNKNOWN
     foreground_checked_at = start
     first_size: tuple[int, int] | None = None
     frame_index = 0
     transitions: list[dict[str, Any]] = []
     actions: list[dict[str, Any]] = []
+    pending_qte_actions: list[dict[str, Any]] = []
     state_counts: dict[str, int] = {}
+    input_path_counts: dict[str, int] = {}
     log_path = output_dir / "live_detections.jsonl"
     device_size = None
     stop_reason: str | None = None
@@ -124,13 +201,60 @@ def run_live(
                                 raise RuntimeError("Foreground package changed; stopping before sending action")
                             foreground_checked_at = time.monotonic()
                     frame = source.read()
+                    metadata = _metadata_from_source(source)
                     if first_size is None:
                         first_size = (frame.shape[1], frame.shape[0])
                     if first_size != (frame.shape[1], frame.shape[0]):
                         raise RuntimeError(f"Screen size changed during live run: {first_size} -> {(frame.shape[1], frame.shape[0])}")
-                    timestamp_s = time.monotonic() - start
-                    detection = analyzer.analyze(frame, frame_index, timestamp_s)
+                    analysis_started_at = time.monotonic()
+                    timestamp_s = analysis_started_at - start
+                    detection = analyzer.analyze(
+                        frame,
+                        frame_index,
+                        timestamp_s,
+                        fast=sampling_state in {FishingState.QTE, FishingState.QUALITY},
+                    )
+                    analysis_finished_at = time.monotonic()
+                    _annotate_frame_timing(
+                        detection,
+                        metadata,
+                        start_monotonic=start,
+                        analysis_started_at=analysis_started_at,
+                        analysis_finished_at=analysis_finished_at,
+                    )
                     state, transition = machine.update(detection)
+                    sampling_state = state
+                    qte_observations: list[dict[str, Any]] = []
+                    for pending in pending_qte_actions:
+                        if pending.get("first_following_frame_s") is None and frame_index > pending["loop_frame_index"]:
+                            pending["first_following_frame_s"] = timestamp_s
+                            pending["first_following_frame_latency_ms"] = round(
+                                (timestamp_s - pending["timestamp_s"]) * 1000.0,
+                                2,
+                            )
+                            qte_observations.append(
+                                {
+                                    "action_timestamp_s": pending["timestamp_s"],
+                                    "first_following_frame_latency_ms": pending["first_following_frame_latency_ms"],
+                                }
+                            )
+                        if (
+                            pending.get("state_transition_observed_s") is None
+                            and transition is not None
+                            and transition.from_state in {FishingState.QTE, FishingState.QUALITY}
+                            and transition.to_state not in {FishingState.QTE, FishingState.QUALITY}
+                        ):
+                            pending["state_transition_observed_s"] = timestamp_s
+                            pending["state_transition_latency_ms"] = round(
+                                (timestamp_s - pending["timestamp_s"]) * 1000.0,
+                                2,
+                            )
+                            qte_observations.append(
+                                {
+                                    "action_timestamp_s": pending["timestamp_s"],
+                                    "state_transition_latency_ms": pending["state_transition_latency_ms"],
+                                }
+                            )
                     if automation is not None:
                         automation.observe(state, timestamp_s, transition)
                         if automation.timed_out(timestamp_s, config.automation):
@@ -146,7 +270,15 @@ def run_live(
                         "state": state.value,
                         "detection": detection.to_dict(),
                         "action": action.to_dict() if action else None,
+                        "timing": _timing_record(
+                            detection,
+                            analysis_started_at=analysis_started_at,
+                            analysis_finished_at=analysis_finished_at,
+                            start_monotonic=start,
+                        ),
                     }
+                    if qte_observations:
+                        record["qte_observations"] = qte_observations
                     if transition is not None:
                         transition_dict = transition.to_dict()
                         transitions.append(transition_dict)
@@ -161,23 +293,48 @@ def run_live(
                             device_size or (frame.shape[1], frame.shape[0]),
                         )
                         action_execution_ms: float | None = None
+                        dispatch_started_s: float | None = None
+                        dispatch_finished_s: float | None = None
                         if send_actions:
                             execution_started = time.monotonic()
-                            controller.execute(sent_action)
-                            action_execution_ms = (time.monotonic() - execution_started) * 1000.0
+                            dispatch_started_s = execution_started - start
+                            input_path = _send_live_action(
+                                source,
+                                controller,
+                                sent_action,
+                                device_size or (frame.shape[1], frame.shape[0]),
+                            )
+                            dispatch_finished_s = time.monotonic() - start
+                            action_execution_ms = (dispatch_finished_s - dispatch_started_s) * 1000.0
+                            input_path_counts[input_path] = input_path_counts.get(input_path, 0) + 1
                             record["action_sent"] = True
                             record["sent_action"] = sent_action.to_dict()
                             record["action_execution_ms"] = round(action_execution_ms, 2)
+                            record["input_path"] = input_path
+                            if state == FishingState.QTE:
+                                record_dispatch = getattr(planner, "record_input_dispatch", None)
+                                if callable(record_dispatch):
+                                    record_dispatch(detection.source_mode or input_path, action_execution_ms / 1000.0)
                         else:
+                            input_path = "dry_run"
                             record["action_sent"] = False
                         action_record = {
                             "timestamp_s": timestamp_s,
+                            "loop_frame_index": frame_index,
                             **action.to_dict(),
                             "sent": send_actions,
                             "sent_action": sent_action.to_dict() if send_actions else None,
+                            "input_path": input_path,
+                            "analysis_start_s": round(timestamp_s, 4),
+                            "frame_pts_us": detection.frame_pts_us,
+                            "frame_age_ms": round(detection.frame_age_s * 1000.0, 2) if detection.frame_age_s is not None else None,
                         }
                         if action_execution_ms is not None:
                             action_record["execution_ms"] = round(action_execution_ms, 2)
+                            action_record["dispatch_start_s"] = round(dispatch_started_s or 0.0, 4)
+                            action_record["dispatch_end_s"] = round(dispatch_finished_s or 0.0, 4)
+                        if state == FishingState.QTE:
+                            pending_qte_actions.append(action_record)
                         actions.append(action_record)
                     log.write(json.dumps(record, ensure_ascii=False) + "\n")
                     log.flush()
@@ -186,7 +343,8 @@ def run_live(
                     if automation is not None and automation.stop_reason is not None:
                         stop_reason = automation.stop_reason
                         break
-                    next_frame = max(next_frame + 1.0 / max(0.5, config.capture_fps), time.monotonic())
+                    sample_fps = _capture_fps_for_state(state, config)
+                    next_frame = max(next_frame + 1.0 / sample_fps, time.monotonic())
             except KeyboardInterrupt:
                 stop_reason = "keyboard_interrupt"
     finally:
@@ -208,6 +366,8 @@ def run_live(
         "state_counts": state_counts,
         "transitions": transitions,
         "actions": actions,
+        "input_path_counts": input_path_counts,
+        "qte_dispatch_latency_estimates_ms": planner.latency_estimates(),
         "scrcpy": scrcpy_status(),
         "log": str(log_path),
         "notes": [

@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--config", help="YAML configuration path")
     live.add_argument("--capture", choices=("auto", "scrcpy", "adb"), default="auto", help="Live frame source")
     live.add_argument("--fps", type=float, default=None, help="Detector sampling rate")
+    live.add_argument("--qte-fps", type=float, default=None, help="QTE/QUALITY detector sampling rate")
     live.add_argument("--output-dir", default="outputs/live")
     live.add_argument("--max-seconds", type=float, default=None)
     live.add_argument("--live", action="store_true", help="Actually send ADB input; omit for dry-run")
@@ -84,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
             config = _config(args.config)
             if args.fps is not None:
                 config.capture_fps = max(0.5, args.fps)
+            if args.qte_fps is not None:
+                config.qte_capture_fps = max(0.5, args.qte_fps)
             summary = run_live(
                 serial=args.serial,
                 package=args.package,

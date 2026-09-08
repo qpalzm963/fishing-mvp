@@ -59,6 +59,7 @@ class ActionConfig:
     # The planner predicts marker motion over this horizon instead of waiting
     # for the marker to visibly enter the target range.
     qte_input_latency_s: float = 0.18
+    qte_latency_sample_window: int = 5
     qte_velocity_samples: int = 3
     qte_min_velocity_norm_s: float = 0.12
     # Some reward animations require one additional screen tap after the
@@ -101,6 +102,7 @@ class AppConfig:
     automation: AutomationConfig = field(default_factory=AutomationConfig)
     scrcpy: ScrcpyConfig = field(default_factory=ScrcpyConfig)
     capture_fps: float = 10.0
+    qte_capture_fps: float = 30.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -134,4 +136,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     _update_dataclass(config.scrcpy, data.get("scrcpy", {}))
     if "capture_fps" in data:
         config.capture_fps = float(data["capture_fps"])
+    if "qte_capture_fps" in data:
+        config.qte_capture_fps = float(data["qte_capture_fps"])
     return config

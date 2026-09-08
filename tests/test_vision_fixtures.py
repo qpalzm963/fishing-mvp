@@ -48,6 +48,18 @@ def test_qte_fixture_detects_gauge_marker_and_target_range():
     assert 0.0 <= detection.gauge_marker_x <= 1.0
 
 
+def test_qte_fast_path_keeps_dynamic_button_and_gauge_detection():
+    analyzer = FrameAnalyzer(DetectorConfig())
+    frame = load_fixture("qte")
+    analyzer.analyze(frame, 0, 0.0)
+    detection = analyzer.analyze(frame, 1, 1 / 30.0, fast=True)
+
+    assert detection.hint == FishingState.QTE
+    assert detection.action_button is not None
+    assert detection.gauge_box is not None
+    assert detection.gauge_marker_x is not None
+
+
 def test_quality_fixture_detects_quality_label_without_ocr():
     detection = FrameAnalyzer(DetectorConfig()).analyze(load_fixture("quality"), 0, 0.0)
     assert detection.hint == FishingState.QUALITY

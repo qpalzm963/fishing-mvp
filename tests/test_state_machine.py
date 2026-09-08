@@ -146,6 +146,45 @@ def test_qte_prediction_triggers_before_marker_enters_target():
     assert "now=0.680" in action.reason
 
 
+def test_qte_prediction_uses_frame_age_analysis_and_source_specific_dispatch_latency():
+    planner = ActionPlanner(
+        ActionConfig(
+            min_confidence=0.5,
+            qte_enabled=True,
+            qte_input_latency_s=0.20,
+            qte_latency_sample_window=3,
+            qte_min_velocity_norm_s=0.1,
+        )
+    )
+    planner.record_input_dispatch("adb", 0.12)
+    planner.record_input_dispatch("scrcpy", 0.02)
+    planner.record_input_dispatch("scrcpy", 0.04)
+    planner.record_input_dispatch("scrcpy", 0.10)
+
+    first = make_detection(0, FishingState.QTE)
+    first.timestamp_s = 1.0
+    first.source_mode = "scrcpy"
+    first.frame_age_s = 0.05
+    first.analysis_duration_s = 0.01
+    first.gauge_marker_x = 0.86
+    first.gauge_target_range = (0.30, 0.51)
+    planner._predict_marker(first)
+
+    second = make_detection(1, FishingState.QTE)
+    second.timestamp_s = 1.1
+    second.source_mode = "scrcpy"
+    second.frame_age_s = 0.05
+    second.analysis_duration_s = 0.01
+    second.gauge_marker_x = 0.68
+    second.gauge_target_range = (0.30, 0.51)
+    predicted, _velocity, horizon = planner._predict_marker(second)
+
+    assert planner.latency_estimates() == {"adb": 120.0, "scrcpy": 40.0}
+    assert round(horizon, 3) == 0.10
+    assert predicted is not None
+    assert round(predicted, 3) == 0.50
+
+
 def test_qte_action_triggers_once_per_target_entry():
     machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
     planner = ActionPlanner(ActionConfig(min_confidence=0.5, qte_enabled=True, qte_min_interval_s=0.18))
@@ -259,8 +298,24 @@ def test_automation_progress_blocks_restart_when_an_active_round_returns_to_wait
 def test_automation_progress_has_a_qte_timeout():
     progress = AutomationProgress(max_rounds=1)
     progress.observe(FishingState.QTE, 2.0)
-    assert not progress.timed_out(4.9, AutomationConfig(qte_timeout_s=3.0))
-    assert progress.timed_out(5.0, AutomationConfig(qte_timeout_s=3.0))
+    config = AutomationConfig(qte_timeout_s=3.0, quality_timeout_s=3.0)
+    assert not progress.timed_out(4.9, config)
+    assert progress.timed_out(5.0, config)
+
+
+def test_automation_progress_qte_and_quality_share_one_phase_timeout():
+    progress = AutomationProgress(max_rounds=1)
+    config = AutomationConfig(qte_timeout_s=3.0, quality_timeout_s=2.0)
+
+    progress.observe(FishingState.QTE, 2.0)
+    progress.observe(FishingState.QUALITY, 3.0)
+    progress.observe(FishingState.QTE, 4.0)
+
+    assert progress.current_state == FishingState.QTE
+    assert progress.current_phase.value == "fishing_qte"
+    assert progress.phase_started_timestamp_s == 2.0
+    assert not progress.timed_out(4.9, config)
+    assert progress.timed_out(5.0, config)
 
 
 def test_qte_context_does_not_flicker_to_casting_on_motion_gap():

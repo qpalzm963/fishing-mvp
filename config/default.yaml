@@ -1,6 +1,8 @@
 # All geometry is expressed as ratios or relationships to detected UI anchors.
 # These values tune detector confidence; they are not click coordinates.
 capture_fps: 10
+# QTE/QUALITY use a faster decision cadence; idle stages keep the lower rate.
+qte_capture_fps: 30
 
 scrcpy:
   # 0 keeps the device stream at its native resolution for safe coordinates.
@@ -49,6 +51,7 @@ action:
   qte_target_margin: 0.05
   # Predict marker position over the observed frame-to-input latency.
   qte_input_latency_s: 0.18
+  qte_latency_sample_window: 5
   qte_velocity_samples: 3
   qte_min_velocity_norm_s: 0.12
   # One guarded tap can dismiss reward animations that need an extra screen tap.

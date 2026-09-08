@@ -91,7 +91,7 @@ python -m fishing_mvp live \
 
 `--capture auto`（預設）會優先使用 scrcpy 串流；找不到 scrcpy 或串流啟動失敗時回退到 ADB screenshot。也可以用 `--capture scrcpy` 強制要求串流，或用 `--capture adb` 明確使用舊的 ADB fallback。
 
-只有明確加上 `--live` 才會送出 ADB input；QTE 與結算後繼續仍需額外開關：
+只有明確加上 `--live` 才會送出手機輸入；在 scrcpy 模式下，零按壓時間的 TAP 會走 scrcpy control socket，ADB screenshot／不支援的按壓動作才會走 ADB。QTE 與結算後繼續仍需額外開關：
 
 ```bash
 python -m fishing_mvp live \
@@ -148,12 +148,13 @@ python -m fishing_mvp live \
 - `--full-auto` 只會操作已在前景且符合 `--package` 的遊戲；它不會替使用者切換 App。
 - 完整自動化的各階段 timeout 在 `config/default.yaml` 的 `automation` 區段設定；超時會停止，不會改用固定座標猜測。
 
-預設 detector 取樣率是 10 FPS（目標每 100 ms 判斷一次），工作影像寬度預設為 480；座標會還原到原始 framebuffer。QTE 事件冷卻預設 0.18 秒，輸入延遲預估預設 0.18 秒，並以 `input tap`（0ms hold）降低 Android 端落後；實際頻率仍會受單幀 OpenCV 計算時間限制。
+預設 detector 在等待／提示／結算階段取樣 10 FPS，在 QTE／QUALITY 階段動態提升到 30 FPS；可用 `--fps` 與 `--qte-fps` 或 YAML 的 `capture_fps`／`qte_capture_fps` 調整。工作影像寬度預設為 480；座標會還原到原始 framebuffer。QTE 事件冷卻預設 0.18 秒，輸入延遲會以來源分開記錄並使用移動中位數；尚未有實測樣本時才使用 `qte_input_latency_s` 初始值。預設以 `input tap`（0ms hold）降低 Android 端落後。
 
 scrcpy 是可選的外部擷取來源：`probe` 會顯示是否可用；使用 `--capture adb` 時不要求 scrcpy 已安裝。
 
 scrcpy 模式會從與桌面 binary 同版本的 scrcpy-server 接收 H.264 影像，PyAV 只負責在本機解碼成 OpenCV frame；不會開啟 scrcpy 視窗，也不會在手機安裝常駐 App。預設保留原生影像尺寸，避免把 normalized 偵測座標映射到錯誤的 framebuffer。
 scrcpy 影像是畫面變更驅動的；靜止 UI 會重用最新幀，避免等待畫面因沒有新封包而誤判 timeout。若裝置解析度／方向和串流不相容，live runner 會在送出前停止。
+scrcpy live session 同時建立 video 與 control socket；TAP 會傳送 scrcpy 4.1 的 DOWN／UP control event，不再為每次點擊啟動 `adb shell input tap` subprocess。若 scrcpy／control socket 無法建立，`auto` 會整體回退到 ADB screenshot 與 ADB input，兩種來源的延遲樣本不會混用；`scrcpy` 強制模式則會直接報錯。live 的 `live_detections.jsonl` 與 `live_summary.json` 會記錄 video PTS、封包到達／解碼時間、frame age、CV 分析時間、control dispatch 時間，以及下一個影格／離開 QTE 的觀測延遲。
 macOS 的 OpenCV 與 PyAV wheel 可能各自攜帶 FFmpeg，啟動時會出現 AVFoundation duplicate-class 警告；本機實測串流仍穩定，若遇到解碼不穩可先改用 `--capture adb`。
 
 ## 設定
