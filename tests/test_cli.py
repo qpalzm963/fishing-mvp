@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from fishing_mvp import cli
+from fishing_mvp import device_discovery
+
+
+def test_discover_device_cli_emits_machine_readable_success(monkeypatch, capsys):
+    calls: list[str] = []
+
+    class FakeDiscovery:
+        def __init__(self, adb_path):
+            calls.append(adb_path)
+
+        def payload(self):
+            return {
+                "ok": True,
+                "serial": "phone-1",
+                "state": "device",
+                "devices": [{"serial": "phone-1", "state": "device", "details": []}],
+            }
+
+    monkeypatch.setattr(device_discovery, "DeviceDiscovery", FakeDiscovery)
+
+    assert cli.main(["discover-device", "--adb-path", r"C:\bundle\adb.exe", "--json"]) == 0
+
+    assert calls == [r"C:\bundle\adb.exe"]
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "serial": "phone-1",
+        "state": "device",
+        "devices": [{"serial": "phone-1", "state": "device", "details": []}],
+    }
+
+
+def test_discover_device_cli_returns_exit_code_two_for_selection_error(monkeypatch, capsys):
+    class FakeDiscovery:
+        def __init__(self, adb_path):
+            pass
+
+        def payload(self):
+            return {
+                "ok": False,
+                "error": {
+                    "code": "multiple_authorized_devices",
+                    "message": "偵測到多台已授權 ADB 裝置。",
+                    "devices": [],
+                },
+            }
+
+    monkeypatch.setattr(device_discovery, "DeviceDiscovery", FakeDiscovery)
+
+    assert cli.main(["discover-device", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "multiple_authorized_devices"
+
+
+@pytest.mark.parametrize("value", ["0", "1000", "-1", "abc"])
+def test_max_rounds_rejects_values_outside_strict_launcher_contract(value):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["live", "--serial", "phone-1", "--max-rounds", value])
+
+
+@pytest.mark.parametrize("value", ["1", "10", "999"])
+def test_max_rounds_accepts_values_in_strict_launcher_contract(value):
+    args = cli.build_parser().parse_args(["live", "--serial", "phone-1", "--max-rounds", value])
+
+    assert args.max_rounds == int(value)

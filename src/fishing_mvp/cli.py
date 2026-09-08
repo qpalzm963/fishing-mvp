@@ -11,15 +11,47 @@ from .capture import scrcpy_status
 from .config import load_config
 from .live import run_live
 from .pipeline import analyze_video
+from .runtime import PortablePaths
+
+
+def _portable_tool_path(name: str, explicit: str | None = None) -> str | None:
+    """Resolve a bundled native tool when running the frozen application."""
+
+    if explicit:
+        return explicit
+    paths = PortablePaths.current()
+    candidate = getattr(paths, name)
+    if getattr(sys, "frozen", False):
+        return str(candidate)
+    return str(candidate) if candidate.is_file() else None
 
 
 def _repo_default_config() -> Path | None:
-    candidate = Path(__file__).resolve().parents[2] / "config" / "default.yaml"
-    return candidate if candidate.exists() else None
+    paths = PortablePaths.current()
+    candidates = [
+        paths.default_config,
+        Path(__file__).resolve().parent / "defaults" / "default.yaml",
+    ]
+    return next((candidate for candidate in candidates if candidate is not None and candidate.exists()), None)
 
 
 def _config(path: str | None):
-    return load_config(path or _repo_default_config())
+    paths = PortablePaths.current()
+    default_path = _repo_default_config()
+    override_path = Path(path) if path else (paths.user_config if paths.user_config.exists() else None)
+    if default_path is not None or override_path is not None:
+        return load_config(override_path, base_path=default_path)
+    return load_config()
+
+
+def _max_rounds(value: str) -> int:
+    try:
+        rounds = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("輪數必須是 1 到 999 的整數。") from exc
+    if not 1 <= rounds <= 999:
+        raise argparse.ArgumentTypeError("輪數必須介於 1 到 999。")
+    return rounds
 
 
 def _add_video_args(parser: argparse.ArgumentParser, default_output: str) -> None:
@@ -53,12 +85,20 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--max-seconds", type=float, default=None)
     live.add_argument("--live", action="store_true", help="Actually send ADB input; omit for dry-run")
     live.add_argument("--full-auto", action="store_true", help="Enable dynamic start -> QTE -> result automation")
-    live.add_argument("--max-rounds", type=int, default=None, help="Full-auto rounds before stopping (default: 1)")
+    live.add_argument("--max-rounds", type=_max_rounds, default=None, help="Full-auto rounds before stopping (1-999; default: 1)")
     live.add_argument("--enable-qte", action="store_true", help="Allow QTE tap proposals to be sent")
     live.add_argument("--auto-continue", action="store_true", help="Allow a detected result continue button to be tapped")
+    live.add_argument("--adb-path", help="Explicit ADB executable path; frozen builds use the bundled copy")
+    live.add_argument("--scrcpy-path", help="Explicit scrcpy executable path; frozen builds use the bundled copy")
 
     probe = subparsers.add_parser("probe", help="Show local capture/control prerequisites")
     probe.add_argument("--serial", help="Optional ADB serial to inspect")
+    probe.add_argument("--adb-path", help="Explicit ADB executable path")
+    probe.add_argument("--scrcpy-path", help="Explicit scrcpy executable path")
+
+    discover = subparsers.add_parser("discover-device", help="Safely select exactly one authorized ADB device")
+    discover.add_argument("--adb-path", help="ADB executable path; frozen builds use the bundled copy")
+    discover.add_argument("--json", action="store_true", help="Write one machine-readable JSON object")
     return parser
 
 
@@ -99,20 +139,31 @@ def main(argv: list[str] | None = None) -> int:
                 max_seconds=args.max_seconds,
                 full_auto=args.full_auto,
                 max_rounds=args.max_rounds,
+                adb_path=_portable_tool_path("adb", args.adb_path) or "adb",
+                scrcpy_executable=_portable_tool_path("scrcpy", args.scrcpy_path),
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
         if args.command == "probe":
-            result = {"scrcpy": scrcpy_status()}
+            adb_path = _portable_tool_path("adb", args.adb_path) or "adb"
+            scrcpy_path = _portable_tool_path("scrcpy", args.scrcpy_path)
+            result = {"scrcpy": scrcpy_status(scrcpy_path)}
             if args.serial:
                 from .actions import ADBController
 
-                controller = ADBController(args.serial)
+                controller = ADBController(args.serial, adb_path=adb_path)
                 controller.assert_connected()
                 result["serial"] = args.serial
                 result["foreground_package"] = controller.foreground_package()
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "discover-device":
+            from .device_discovery import DeviceDiscovery
+
+            adb_path = _portable_tool_path("adb", args.adb_path) or "adb"
+            payload = DeviceDiscovery(adb_path).payload()
+            print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            return 0 if payload.get("ok") is True else 2
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

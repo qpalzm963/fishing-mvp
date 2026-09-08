@@ -18,9 +18,14 @@ class ADBError(RuntimeError):
 class ADBController:
     serial: str
     timeout_s: float = 4.0
+    adb_path: str | Path = "adb"
+
+    @property
+    def _adb_command(self) -> str:
+        return str(self.adb_path)
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
-        command = ["adb", "-s", self.serial, *args]
+        command = [self._adb_command, "-s", self.serial, *args]
         try:
             result = subprocess.run(command, capture_output=True, timeout=self.timeout_s, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -31,7 +36,11 @@ class ADBController:
         return result
 
     def assert_connected(self) -> None:
-        result = subprocess.run(["adb", "devices"], capture_output=True, timeout=self.timeout_s, check=False)
+        command = [self._adb_command, "devices"]
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=self.timeout_s, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ADBError(f"ADB command failed: {' '.join(command)}: {exc}") from exc
         if result.returncode != 0:
             raise ADBError(result.stderr.decode("utf-8", errors="replace").strip() or "adb devices failed")
         serials = []
@@ -70,7 +79,7 @@ class ADBController:
         self._run("reverse", "--remove", f"localabstract:{socket_name}", check=False)
 
     def popen(self, *args: str) -> subprocess.Popen[str]:
-        command = ["adb", "-s", self.serial, *args]
+        command = [self._adb_command, "-s", self.serial, *args]
         try:
             return subprocess.Popen(
                 command,

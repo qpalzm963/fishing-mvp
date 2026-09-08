@@ -1,0 +1,253 @@
+name: Windows x64 portable package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create (must start with v, for example v0.1.0)"
+        required: true
+        type: string
+
+# Pull requests and normal builds never receive write access to repository contents.
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  # The packaging contract must pin and record this same protocol version.
+  FISHING_MVP_SCRCPY_VERSION: "4.1"
+  FISHING_MVP_RELEASE_TAG: ${{ inputs.release_tag }}
+
+jobs:
+  windows-portable:
+    name: Build and smoke-test Windows x64 portable package
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      package_name: ${{ steps.package.outputs.package_name }}
+      package_root: ${{ steps.package.outputs.package_root }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+
+      - name: Install build and test dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --upgrade pip
+          python -m pip install '.[dev,scrcpy]'
+          python -m pip install pyinstaller
+
+      - name: Run source tests
+        run: python -m pytest -q
+
+      - name: Compile source and tests
+        run: python -m compileall -q src tests
+
+      - name: Build portable package through the packaging contract
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $contract = Join-Path $env:GITHUB_WORKSPACE 'packaging/build_windows.ps1'
+          if (-not (Test-Path -LiteralPath $contract -PathType Leaf)) {
+            throw "Required packaging contract is missing: packaging/build_windows.ps1"
+          }
+
+          # The script owns the pinned scrcpy version; this workflow refuses a
+          # package contract that does not mention scrcpy 4.1.
+          $contractText = Get-Content -LiteralPath $contract -Raw
+          if ($contractText -notmatch '(?is)scrcpy' -or $contractText -notmatch '4\.1') {
+            throw "packaging/build_windows.ps1 must pin and record scrcpy 4.1"
+          }
+
+          $releaseTag = $env:FISHING_MVP_RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($releaseTag)) {
+            $releaseTag = $env:GITHUB_REF_NAME
+          }
+          if ($releaseTag -notmatch '^v[0-9]') {
+            $releaseTag = "v0.0.0-ci.$env:GITHUB_RUN_NUMBER"
+          }
+          $packageName = "FishingMVP-$releaseTag-Windows-x64"
+          $packageRoot = Join-Path $env:RUNNER_TEMP $packageName
+          if (Test-Path -LiteralPath $packageRoot) {
+            Remove-Item -LiteralPath $packageRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $packageRoot | Out-Null
+
+          # Stable interface between this workflow and packaging/build_windows.ps1.
+          # The script must assemble the complete onedir package at
+          # -OutputDirectory.  The environment variable is also available to
+          # future packaging helpers without becoming the required interface.
+          $env:FISHING_MVP_PORTABLE_OUTPUT = $packageRoot
+          & $contract -OutputDirectory $packageRoot
+          if ($LASTEXITCODE) {
+            throw "packaging/build_windows.ps1 failed with exit code $LASTEXITCODE"
+          }
+          $exe = Get-ChildItem -LiteralPath $packageRoot -Filter 'FishingMVP.exe' -File -Recurse | Select-Object -First 1
+          if ($null -eq $exe) {
+            throw "Packaging contract did not produce FishingMVP.exe in $packageRoot"
+          }
+
+          "package_name=$packageName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "package_root=$packageRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Smoke-test the assembled portable directory
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.package_root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path -LiteralPath $env:PACKAGE_ROOT).Path
+          $exe = Get-ChildItem -LiteralPath $root -Filter 'FishingMVP.exe' -File -Recurse | Select-Object -First 1
+          if ($null -eq $exe) {
+            throw 'FishingMVP.exe was not found in the assembled portable directory'
+          }
+          Write-Host 'Portable smoke: FishingMVP.exe --help'
+          & $exe.FullName --help
+          if ($LASTEXITCODE) {
+            throw "FishingMVP.exe --help failed with exit code $LASTEXITCODE"
+          }
+
+          $configCandidates = @(
+            (Join-Path $root 'config\default.yaml'),
+            (Join-Path $root 'portable\config\default.yaml'),
+            (Join-Path $root 'runtime\config\default.yaml'),
+            (Join-Path $root 'runtime\_internal\fishing_mvp\defaults\default.yaml'),
+            (Join-Path $root '_internal\fishing_mvp\defaults\default.yaml')
+          )
+          if (-not ($configCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) {
+            throw 'Bundled default.yaml was not found in the portable package'
+          }
+
+          $manifestPath = Join-Path $root 'runtime-manifest.json'
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw 'runtime-manifest.json was not found in the portable package'
+          }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.build_contract.scrcpy_version -ne '4.1') {
+            throw 'runtime-manifest.json does not record the pinned scrcpy 4.1 contract'
+          }
+
+          $scrcpyRoot = @(
+            (Join-Path $root 'runtime\scrcpy'),
+            (Join-Path $root 'runtime'),
+            (Join-Path $root 'scrcpy')
+          ) | Where-Object {
+            (Test-Path -LiteralPath $_ -PathType Container) -and
+            (Test-Path -LiteralPath (Join-Path $_ 'scrcpy.exe') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $_ 'adb.exe') -PathType Leaf)
+          } | Select-Object -First 1
+          if ($null -eq $scrcpyRoot) {
+            throw 'Bundled scrcpy runtime directory was not found'
+          }
+          foreach ($requiredFile in @('scrcpy.exe', 'adb.exe', 'AdbWinApi.dll', 'AdbWinUsbApi.dll')) {
+            $requiredPath = Join-Path $scrcpyRoot $requiredFile
+            if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+              throw "Bundled runtime file is missing: runtime\scrcpy\$requiredFile"
+            }
+          }
+          $server = Get-ChildItem -LiteralPath $scrcpyRoot -File | Where-Object { $_.Name -like 'scrcpy-server*' }
+          if (-not $server) {
+            throw 'Bundled scrcpy-server was not found'
+          }
+
+          $scrcpyVersion = (& (Join-Path $scrcpyRoot 'scrcpy.exe') --version 2>&1 | Out-String)
+          if ($scrcpyVersion -notmatch '(?i)\bscrcpy\s+4\.1(?:\b|\.)') {
+            throw "Bundled scrcpy is not version 4.1: $scrcpyVersion"
+          }
+          & (Join-Path $scrcpyRoot 'adb.exe') version
+          if ($LASTEXITCODE) {
+            throw "Bundled adb.exe version check failed with exit code $LASTEXITCODE"
+          }
+
+          # Exercise PyAV/H.264 in the build environment and verify PyAV files
+          # were copied into the frozen package. No Android device is required.
+          python -c "import av; decoder = av.CodecContext.create('h264', 'r'); print(decoder.name)"
+          if ($LASTEXITCODE) {
+            throw "PyAV H.264 decoder smoke test failed with exit code $LASTEXITCODE"
+          }
+          $pyavFiles = Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object {
+            $_.FullName -match '(?i)(\\|/)av(\\|/)' -or $_.Name -match '(?i)^av.*\.(pyd|dll)$'
+          }
+          if (-not $pyavFiles) {
+            throw 'PyAV files were not found in the frozen portable package'
+          }
+
+      - name: Zip portable package
+        id: archive
+        shell: pwsh
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.package_name }}
+          PACKAGE_ROOT: ${{ steps.package.outputs.package_root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'fishing-mvp-artifacts'
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+          $archive = Join-Path $artifactDir "$env:PACKAGE_NAME.zip"
+          Compress-Archive -Path $env:PACKAGE_ROOT -DestinationPath $archive -CompressionLevel Optimal -Force
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Portable archive was not created: $archive"
+          }
+          "archive=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload portable package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.package_name }}
+          path: ${{ steps.archive.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish Windows x64 release asset
+    needs: windows-portable
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download portable package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.windows-portable.outputs.package_name }}
+          path: release
+
+      - name: Validate release tag
+        id: release-tag
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_tag="$DISPATCH_RELEASE_TAG"
+          else
+            release_tag="$GITHUB_REF_NAME"
+          fi
+          if [[ ! "$release_tag" =~ ^v[0-9] ]]; then
+            echo "Release tag must start with v and a version number: $release_tag" >&2
+            exit 1
+          fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release-tag.outputs.tag }}
+          files: release/*.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true

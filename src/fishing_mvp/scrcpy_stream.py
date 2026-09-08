@@ -109,13 +109,18 @@ def _server_candidates(executable: Path, version: str) -> list[Path]:
     return unique
 
 
-def discover_scrcpy() -> ScrcpyInstallation:
+def discover_scrcpy(executable_path: str | Path | None = None) -> ScrcpyInstallation:
     """Find the desktop binary and its matching server jar."""
 
-    executable_name = shutil.which("scrcpy")
-    if executable_name is None:
-        raise ScrcpyError("scrcpy is not installed or not available in PATH")
-    executable = Path(executable_name)
+    if executable_path is None:
+        executable_name = shutil.which("scrcpy")
+        if executable_name is None:
+            raise ScrcpyError("scrcpy is not installed or not available in PATH")
+        executable = Path(executable_name)
+    else:
+        executable = Path(executable_path).expanduser()
+        if not executable.is_file():
+            raise ScrcpyError(f"scrcpy executable was not found: {executable}")
     version = _scrcpy_version(executable)
     candidates = _server_candidates(executable, version)
     if not candidates:
@@ -125,20 +130,31 @@ def discover_scrcpy() -> ScrcpyInstallation:
     return ScrcpyInstallation(executable=executable, version=version, server_path=candidates[0])
 
 
-def scrcpy_status() -> dict[str, object]:
+def scrcpy_status(executable_path: str | Path | None = None) -> dict[str, object]:
     """Report scrcpy availability without importing the optional decoder."""
 
-    executable_name = shutil.which("scrcpy")
-    if executable_name is None:
-        return {
-            "available": False,
-            "path": None,
-            "version": None,
-            "server_path": None,
-        }
-    executable = Path(executable_name)
+    if executable_path is None:
+        executable_name = shutil.which("scrcpy")
+        if executable_name is None:
+            return {
+                "available": False,
+                "path": None,
+                "version": None,
+                "server_path": None,
+            }
+        executable = Path(executable_name)
+    else:
+        executable = Path(executable_path).expanduser()
+        if not executable.is_file():
+            return {
+                "available": False,
+                "path": str(executable),
+                "version": None,
+                "server_path": None,
+                "error": "scrcpy executable was not found",
+            }
     try:
-        installation = discover_scrcpy()
+        installation = discover_scrcpy(executable)
     except ScrcpyError as exc:
         return {
             "available": True,
@@ -215,6 +231,7 @@ class ScrcpyFrameSource:
         video_bit_rate: int = 8_000_000,
         connect_timeout_s: float = 10.0,
         frame_timeout_s: float = 3.0,
+        scrcpy_executable: str | Path | None = None,
     ) -> None:
         self.controller = controller
         self.max_size = max(0, int(max_size))
@@ -222,6 +239,7 @@ class ScrcpyFrameSource:
         self.video_bit_rate = max(250_000, int(video_bit_rate))
         self.connect_timeout_s = max(1.0, float(connect_timeout_s))
         self.frame_timeout_s = max(0.5, float(frame_timeout_s))
+        self.scrcpy_executable = Path(scrcpy_executable).expanduser() if scrcpy_executable is not None else None
 
         self.installation: ScrcpyInstallation | None = None
         self.server_process: subprocess.Popen[str] | None = None
@@ -262,7 +280,7 @@ class ScrcpyFrameSource:
         if self.decode_thread is not None and self.decode_thread.is_alive():
             return
         self.controller.assert_connected()
-        self.installation = discover_scrcpy()
+        self.installation = discover_scrcpy(self.scrcpy_executable)
         if self.installation.version != SCRCPY_CONTROL_PROTOCOL_VERSION:
             raise ScrcpyError(
                 "scrcpy control input is version-pinned to "

@@ -108,6 +108,7 @@ def create_live_frame_source(
     scrcpy_video_bit_rate: int = 8_000_000,
     scrcpy_connect_timeout_s: float = 10.0,
     scrcpy_frame_timeout_s: float = 3.0,
+    scrcpy_executable: str | None = None,
 ) -> tuple[LiveFrameSource, str | None]:
     """Start a live source, optionally falling back to ADB screenshots."""
 
@@ -124,6 +125,7 @@ def create_live_frame_source(
             video_bit_rate=scrcpy_video_bit_rate,
             connect_timeout_s=scrcpy_connect_timeout_s,
             frame_timeout_s=scrcpy_frame_timeout_s,
+            scrcpy_executable=scrcpy_executable,
         )
         source.start()
         return source, None

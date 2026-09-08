@@ -1,0 +1,108 @@
+Fishing MVP Windows x64 portable 前置版
+========================================
+
+這兩個批次檔是 Issue #3 的 launcher / 裝置偵測前置作業。正式發佈時，
+請將它們放在下列目錄的最外層：
+
+  FishingMVP-v0.x.x-Windows-x64\
+  ├─ START.bat
+  ├─ STOP.bat
+  ├─ 使用說明.txt
+  ├─ config\
+  │  └─ user.yaml                 （選用）
+  └─ runtime\
+     ├─ FishingMVP.exe
+     └─ scrcpy\
+        ├─ scrcpy.exe
+        ├─ scrcpy-server           （必須與 scrcpy.exe 同版本）
+        ├─ adb.exe
+        ├─ AdbWinApi.dll
+        ├─ AdbWinUsbApi.dll
+        └─ 其他官方 Windows x64 scrcpy 檔案
+
+這是 Windows x64 portable distribution 的前置實作。PyInstaller build script
+會將 FishingMVP.exe、官方 pinned scrcpy runtime、這兩個 launcher 與本說明
+檔組成同一個 ZIP；正式 Release 仍須在乾淨 Windows 主機完成實機 smoke test。
+
+使用方式
+--------
+
+1. Android 開啟 USB debugging，接上電腦並在手機上允許授權提示。
+2. 開啟遊戲，停在釣魚畫面。
+3. 雙擊 START.bat。
+4. 輸入 1 到 999 的整數輪數；空白、非數字、0、負數或大於 999 都會顯示
+   中文錯誤並離開，不會啟動遊戲流程。
+5. 需要停止時，雙擊 STOP.bat。它只會終止本目錄 PID 檔案所驗證的
+   FishingMVP.exe 及其子程序樹，不會廣泛終止其他 adb / scrcpy 程序。
+
+START.bat 只把 runtime\scrcpy 暫時放在目前程序樹的 PATH 最前面，並且只使用
+portable 目錄內的 adb.exe、scrcpy.exe、scrcpy-server 與 FishingMVP.exe。它會
+使用 --capture scrcpy --live --full-auto 啟動；scrcpy 任何啟動或解碼失敗都會
+停止並顯示原因，絕不 fallback 到 ADB screenshot。
+
+discover-device JSON 契約
+-------------------------------
+
+START.bat 預期呼叫：
+
+  runtime\FishingMVP.exe discover-device --adb-path runtime\scrcpy\adb.exe --json
+
+成功時：
+
+  * process exit code = 0
+  * stdout 是一個 JSON object（可為單行或合法 JSON 文件）
+  * 必須包含：
+
+      {"ok":true,"serial":"<serial>","state":"device","devices":[...]}
+
+  * 只能有一個 state="device" 的裝置列；serial 是該裝置的完整 ADB
+    serial。launcher 不會自行從多列資料猜選。
+
+失敗時：
+
+  * process exit code = 2
+  * stdout 仍輸出 JSON object，且不得包含可供啟動使用的 serial：
+
+      {"ok":false,"error":{"code":"<code>","message":"<中文訊息>","devices":[...]}}
+
+  * code 分類：
+
+      no_devices                    沒有任何裝置列
+      multiple_authorized_devices   有兩台以上 state=device
+      unauthorized                  只有 unauthorized / no permissions
+      offline                       只有 offline
+      mixed_devices                 authorized 與其他狀態，或多種非授權狀態
+      unsupported_state             只有無法使用的其他狀態
+      adb_unavailable               ADB 執行檔找不到、無法啟動或 runner 失敗
+      adb_command_failed            ADB command 回傳非零 exit code
+
+  * stderr 可另外輸出給開發者看的診斷；launcher 會把 stdout/stderr 保存到
+    run\discover-device.json / discover-device.err。
+
+裝置選擇規則是 fail-safe：0 台、多台已授權、unauthorized、offline、混合
+狀態都停止；即使一台 authorized 旁邊還有 offline / unauthorized，也不會
+靜默選擇 authorized 那台。
+
+開發者 runner API（Python）
+---------------------------
+
+`fishing_mvp.device_discovery.DeviceDiscovery` 接受 injectable runner：
+
+  runner(command: Sequence[str]) -> RunnerResult
+
+其中 `RunnerResult(returncode, stdout, stderr)` 是最小的 subprocess 結果形狀。
+`DeviceDiscovery(adb_path=...)` 會以：
+
+  (<adb_path>, "devices", "-l")
+
+呼叫 runner；`parse_adb_devices()` 負責解析狀態，
+`select_authorized_device()` 只在恰好一台 state=device 時回傳裝置。
+其餘情況會丟出帶有 code/category/devices 的 `DeviceDiscoveryError`。
+
+目前限制
+----------
+
+* macOS 開發機無法執行 Windows `.bat` 或 Windows x64 build；請在 Windows
+  PowerShell 執行 `packaging\build_windows.ps1`。
+* GitHub Actions 會產生 artifact；只有 versioned tag 或手動指定 tag 才會
+  建立 GitHub Release。

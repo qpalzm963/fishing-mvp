@@ -33,6 +33,22 @@ brew install scrcpy
 python -m pip install -e '.[dev,scrcpy]'
 ```
 
+### Windows x64 portable 前置版
+
+Issue #3 的分發前置作業已加入 PyInstaller onedir build、裝置安全偵測與
+GitHub Actions。Windows 機器可在 PowerShell 執行：
+
+```powershell
+.\packaging\build_windows.ps1 -OutputDirectory .\build\fishing-mvp-windows
+```
+
+輸出會包含根目錄 `START.bat`／`STOP.bat`、`config\default.yaml`、可選的
+`config\user.yaml`，以及 `runtime\FishingMVP.exe` 與 pinned scrcpy v4.1
+官方檔案。雙擊 `START.bat` 後輸入 1–999 輪；它只會在偵測到恰好一台已授權
+裝置時啟動，並強制使用 scrcpy，不會靜默 fallback 到 ADB screenshot。
+完整流程與限制請見 [`packaging/README.md`](packaging/README.md) 與
+[`portable/使用說明.txt`](portable/使用說明.txt)。
+
 ## 離線影片分析
 
 ```bash

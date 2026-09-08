@@ -116,26 +116,42 @@ def _update_dataclass(instance: Any, values: dict[str, Any]) -> Any:
     return instance
 
 
-def load_config(path: str | Path | None = None) -> AppConfig:
+def load_config(
+    path: str | Path | None = None,
+    *,
+    base_path: str | Path | None = None,
+) -> AppConfig:
+    """Load a packaged/default config and then an optional override file.
+
+    Existing callers that pass one config path retain the original behavior.
+    The portable launcher uses ``base_path`` for the packaged baseline and
+    ``path`` for an operator-owned ``config/user.yaml`` override.
+    """
+
     config = AppConfig(
         detector=DetectorConfig(),
         state_machine=StateMachineConfig(),
         action=ActionConfig(),
     )
-    if path is None:
-        return config
-    config_path = Path(path)
-    with config_path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"Config must be a mapping: {config_path}")
-    _update_dataclass(config.detector, data.get("detector", {}))
-    _update_dataclass(config.state_machine, data.get("state_machine", {}))
-    _update_dataclass(config.action, data.get("action", {}))
-    _update_dataclass(config.automation, data.get("automation", {}))
-    _update_dataclass(config.scrcpy, data.get("scrcpy", {}))
-    if "capture_fps" in data:
-        config.capture_fps = float(data["capture_fps"])
-    if "qte_capture_fps" in data:
-        config.qte_capture_fps = float(data["qte_capture_fps"])
+
+    def apply_file(config_path: str | Path) -> None:
+        config_path = Path(config_path)
+        with config_path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        if not isinstance(data, dict):
+            raise ValueError(f"Config must be a mapping: {config_path}")
+        _update_dataclass(config.detector, data.get("detector", {}))
+        _update_dataclass(config.state_machine, data.get("state_machine", {}))
+        _update_dataclass(config.action, data.get("action", {}))
+        _update_dataclass(config.automation, data.get("automation", {}))
+        _update_dataclass(config.scrcpy, data.get("scrcpy", {}))
+        if "capture_fps" in data:
+            config.capture_fps = float(data["capture_fps"])
+        if "qte_capture_fps" in data:
+            config.qte_capture_fps = float(data["qte_capture_fps"])
+
+    if base_path is not None:
+        apply_file(base_path)
+    if path is not None:
+        apply_file(path)
     return config
