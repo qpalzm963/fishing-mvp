@@ -170,9 +170,12 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
     min_radius = max(8, int(width * config.button_min_radius_ratio))
     max_radius = max(min_radius + 4, int(width * config.button_max_radius_ratio))
     candidates: list[_ButtonCandidate] = []
+    search_top = max(0, int(height * config.button_min_y_ratio - max_radius - 8))
+    search_bottom = min(height, int(height * config.button_max_y_ratio + max_radius + 8))
+    search_blurred = blurred[search_top:search_bottom, :]
 
     circles = cv2.HoughCircles(
-        blurred,
+        search_blurred,
         cv2.HOUGH_GRADIENT,
         dp=1.2,
         minDist=max(12, int(width * 0.12)),
@@ -183,6 +186,7 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
     )
     if circles is not None:
         for raw_cx, raw_cy, raw_radius in np.round(circles[0]).astype(int):
+            raw_cy += search_top
             y_ratio = raw_cy / max(1, height)
             if y_ratio < config.button_min_y_ratio or y_ratio > config.button_max_y_ratio:
                 continue
@@ -200,7 +204,7 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
 
     # A contour fallback handles anti-aliased rings that do not produce a
     # stable Hough circle on some devices or video codecs.
-    edges = cv2.Canny(blurred, 45, 130)
+    edges = cv2.Canny(search_blurred, 45, 130)
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     for contour in _contours(edges):
         area = cv2.contourArea(contour)
@@ -213,6 +217,7 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
         if circularity < 0.45:
             continue
         (cx, cy), radius = cv2.minEnclosingCircle(contour)
+        cy += search_top
         y_ratio = cy / max(1, height)
         if y_ratio < config.button_min_y_ratio or y_ratio > config.button_max_y_ratio or not (min_radius <= radius <= max_radius):
             continue

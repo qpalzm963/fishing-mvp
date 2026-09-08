@@ -17,14 +17,20 @@ Python + OpenCV + ADB 的動態釣魚 UI 偵測 MVP。專案針對錄影中的�
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -e '.[dev]'
 ```
 
-也可以用可執行入口：
+安裝完成後即可使用可執行入口：
 
 ```bash
-python -m pip install -e '.[dev]'
 fishing-mvp --help
+```
+
+要使用低延遲 scrcpy 影像串流，另外安裝 scrcpy 與 PyAV：
+
+```bash
+brew install scrcpy
+python -m pip install -e '.[dev,scrcpy]'
 ```
 
 ## 離線影片分析
@@ -64,7 +70,7 @@ python -m fishing_mvp debug \
 
 兩次 prompt 都從偵測到的 action button 中心產生 tap proposal；離線分析預設不產生 QTE 點擊，QTE 執行需在 live 模式明確加上 `--enable-qte`。
 
-## Live / ADB
+## Live / scrcpy / ADB
 
 先手動在裝置上開啟遊戲，確認 ADB serial：
 
@@ -79,8 +85,11 @@ python -m fishing_mvp probe --serial YOUR_SERIAL
 python -m fishing_mvp live \
   --serial YOUR_SERIAL \
   --package YOUR.GAME.PACKAGE \
+  --capture auto \
   --output-dir outputs/live
 ```
+
+`--capture auto`（預設）會優先使用 scrcpy 串流；找不到 scrcpy 或串流啟動失敗時回退到 ADB screenshot。也可以用 `--capture scrcpy` 強制要求串流，或用 `--capture adb` 明確使用舊的 ADB fallback。
 
 只有明確加上 `--live` 才會送出 ADB input；QTE 與結算後繼續仍需額外開關：
 
@@ -100,7 +109,13 @@ python -m fishing_mvp live \
 - 程式不會自動啟動、切換、重啟或 force-stop App。
 - `--enable-qte` 採單擊事件模型，點擊間隔與按壓時間可在 YAML 調整。
 
-目前 scrcpy 是可選外部工具：`probe` 會顯示是否可用；偵測與 ADB screenshot fallback 不要求 scrcpy 已安裝。
+預設 detector 取樣率是 10 FPS（目標每 100 ms 判斷一次）；QTE 事件冷卻預設 0.18 秒，實際頻率仍會受單幀 OpenCV 計算時間限制。
+
+scrcpy 是可選的外部擷取來源：`probe` 會顯示是否可用；使用 `--capture adb` 時不要求 scrcpy 已安裝。
+
+scrcpy 模式會從與桌面 binary 同版本的 scrcpy-server 接收 H.264 影像，PyAV 只負責在本機解碼成 OpenCV frame；不會開啟 scrcpy 視窗，也不會在手機安裝常駐 App。預設保留原生影像尺寸，避免把 normalized 偵測座標映射到錯誤的 framebuffer。
+scrcpy 影像是畫面變更驅動的；靜止 UI 會重用最新幀，避免等待畫面因沒有新封包而誤判 timeout。若裝置解析度／方向和串流不相容，live runner 會在送出前停止。
+macOS 的 OpenCV 與 PyAV wheel 可能各自攜帶 FFmpeg，啟動時會出現 AVFoundation duplicate-class 警告；本機實測串流仍穩定，若遇到解碼不穩可先改用 `--capture adb`。
 
 ## 設定
 
@@ -119,8 +134,8 @@ python -m fishing_mvp analyze-video \
 python -m pytest
 ```
 
-測試涵蓋 HSV mask、normalized geometry、狀態機穩定幀／unknown grace、action cooldown 與安全模式。影片驗證是以可重現的狀態時間線與 annotated output 為主，並不把未標註影片宣稱為正式 precision／recall benchmark。
+測試涵蓋 HSV mask、normalized geometry、狀態機穩定幀／unknown grace、action cooldown、QTE 目標區去重、scrcpy packet metadata 與安全模式。影片驗證是以可重現的狀態時間線與 annotated output 為主，並不把未標註影片宣稱為正式 precision／recall benchmark。
 
 `tests/fixtures/` 包含從測試影片抽出的少量 waiting、prompt、QTE、quality、result 影格，直接回歸 action button、prompt、gauge、marker、quality、result 與 continue 偵測；完整影片不需要放進 repository。GitHub Actions 會在 Python 3.10 與 3.12 執行安裝、pytest 與 compileall。
 
-這次工作環境當下沒有連線 ADB 裝置，且沒有預裝 OpenCV、pytest 或 scrcpy；依賴安裝後可完成離線驗證，live 仍需使用者提供裝置與 package 才能做實機 smoke test。
+沒有 Android 裝置時仍可完成影片與 fixture 離線驗證；live 模式需要使用者提供已授權的 ADB 裝置。scrcpy 模式另外需要桌面 scrcpy、PyAV 與可用的 H.264 解碼環境，若條件不滿足，`auto` 會回退到 ADB screenshot。

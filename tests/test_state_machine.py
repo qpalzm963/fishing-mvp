@@ -77,6 +77,25 @@ def test_qte_actions_are_opt_in():
     assert action is not None and action.action_type.value == "tap"
 
 
+def test_qte_action_triggers_once_per_target_entry():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
+    planner = ActionPlanner(ActionConfig(min_confidence=0.5, qte_enabled=True, qte_min_interval_s=0.18))
+
+    state, transition = machine.update(make_detection(0, FishingState.QTE))
+    assert planner.plan(make_detection(0, FishingState.QTE), state, transition) is not None
+
+    state, transition = machine.update(make_detection(1, FishingState.QTE))
+    assert planner.plan(make_detection(1, FishingState.QTE), state, transition) is None
+
+    outside = make_detection(2, FishingState.QTE)
+    outside.gauge_marker_x = 0.1
+    state, transition = machine.update(outside)
+    assert planner.plan(outside, state, transition) is None
+
+    state, transition = machine.update(make_detection(3, FishingState.QTE))
+    assert planner.plan(make_detection(3, FishingState.QTE), state, transition) is not None
+
+
 def test_qte_context_does_not_flicker_to_casting_on_motion_gap():
     machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
     machine.update(make_detection(0, FishingState.QTE))

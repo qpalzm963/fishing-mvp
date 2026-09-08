@@ -54,10 +54,20 @@ class ActionConfig:
 
 
 @dataclass
+class ScrcpyConfig:
+    max_size: int = 0
+    max_fps: int = 30
+    video_bit_rate: int = 8_000_000
+    connect_timeout_s: float = 10.0
+    frame_timeout_s: float = 3.0
+
+
+@dataclass
 class AppConfig:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     state_machine: StateMachineConfig = field(default_factory=StateMachineConfig)
     action: ActionConfig = field(default_factory=ActionConfig)
+    scrcpy: ScrcpyConfig = field(default_factory=ScrcpyConfig)
     capture_fps: float = 10.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -88,6 +98,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     _update_dataclass(config.detector, data.get("detector", {}))
     _update_dataclass(config.state_machine, data.get("state_machine", {}))
     _update_dataclass(config.action, data.get("action", {}))
+    _update_dataclass(config.scrcpy, data.get("scrcpy", {}))
     if "capture_fps" in data:
         config.capture_fps = float(data["capture_fps"])
     return config

@@ -87,6 +87,7 @@ class ActionPlanner:
     last_qte_timestamp: float = -1.0
     last_result_timestamp: float = -1.0
     prompt_handled: bool = False
+    qte_in_target: bool = False
 
     def plan(
         self,
@@ -96,6 +97,8 @@ class ActionPlanner:
     ) -> Action | None:
         if state != FishingState.PROMPT:
             self.prompt_handled = False
+        if state != FishingState.QTE:
+            self.qte_in_target = False
         if detection.confidence < self.config.min_confidence:
             return None
         if (
@@ -119,15 +122,21 @@ class ActionPlanner:
             and detection.action_button is not None
             and detection.gauge_marker_x is not None
             and detection.gauge_target_range is not None
-            and self._marker_in_target(detection.gauge_marker_x, detection.gauge_target_range)
-            and self._allowed(detection.timestamp_s, self.last_qte_timestamp, self.config.qte_min_interval_s)
         ):
-            self.last_qte_timestamp = detection.timestamp_s
-            return self._tap_for_box(
-                detection,
-                detection.action_button,
-                "gauge marker inside detected target colour range",
-            )
+            in_target = self._marker_in_target(detection.gauge_marker_x, detection.gauge_target_range)
+            if not in_target:
+                self.qte_in_target = False
+            elif (
+                not self.qte_in_target
+                and self._allowed(detection.timestamp_s, self.last_qte_timestamp, self.config.qte_min_interval_s)
+            ):
+                self.qte_in_target = True
+                self.last_qte_timestamp = detection.timestamp_s
+                return self._tap_for_box(
+                    detection,
+                    detection.action_button,
+                    "gauge marker entered detected target colour range",
+                )
 
         if (
             state == FishingState.RESULT

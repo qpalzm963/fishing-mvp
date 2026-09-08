@@ -41,11 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     debug = subparsers.add_parser("debug", help="Offline analysis with annotated debug artefacts")
     _add_video_args(debug, "outputs/debug")
 
-    live = subparsers.add_parser("live", help="Read ADB screenshots; dry-run unless --live is explicit")
+    live = subparsers.add_parser("live", help="Read live device frames; dry-run unless --live is explicit")
     live.add_argument("--serial", required=True, help="ADB device serial")
     live.add_argument("--package", help="Expected foreground package; no package is launched")
     live.add_argument("--config", help="YAML configuration path")
-    live.add_argument("--fps", type=float, default=None, help="ADB screenshot loop rate")
+    live.add_argument("--capture", choices=("auto", "scrcpy", "adb"), default="auto", help="Live frame source")
+    live.add_argument("--fps", type=float, default=None, help="Detector sampling rate")
     live.add_argument("--output-dir", default="outputs/live")
     live.add_argument("--max-seconds", type=float, default=None)
     live.add_argument("--live", action="store_true", help="Actually send ADB input; omit for dry-run")
@@ -81,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
                 package=args.package,
                 config=config,
                 output_dir=args.output_dir,
+                capture_mode=args.capture,
                 send_actions=args.live,
                 qte_enabled=args.enable_qte,
                 auto_continue=args.auto_continue,
