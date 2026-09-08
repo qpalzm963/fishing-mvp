@@ -28,7 +28,9 @@ def test_discover_device_cli_emits_machine_readable_success(monkeypatch, capsys)
     assert cli.main(["discover-device", "--adb-path", r"C:\bundle\adb.exe", "--json"]) == 0
 
     assert calls == [r"C:\bundle\adb.exe"]
-    assert json.loads(capsys.readouterr().out) == {
+    output = capsys.readouterr().out
+    assert output.isascii()
+    assert json.loads(output) == {
         "ok": True,
         "serial": "phone-1",
         "state": "device",
@@ -55,7 +57,9 @@ def test_discover_device_cli_returns_exit_code_two_for_selection_error(monkeypat
 
     assert cli.main(["discover-device", "--json"]) == 2
 
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    assert output.isascii()
+    payload = json.loads(output)
     assert payload["ok"] is False
     assert payload["error"]["code"] == "multiple_authorized_devices"
 

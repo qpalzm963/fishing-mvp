@@ -14,6 +14,24 @@ from .pipeline import analyze_video
 from .runtime import PortablePaths
 
 
+def _configure_utf8_stdio() -> None:
+    """Make frozen Windows console and pipe output deterministic when possible."""
+
+    if sys.platform != "win32":
+        return
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, TypeError, ValueError):
+            # Some embedded/frozen hosts expose a stream without a writable
+            # encoding. Machine-readable commands still use ASCII JSON below.
+            continue
+
+
 def _portable_tool_path(name: str, explicit: str | None = None) -> str | None:
     """Resolve a bundled native tool when running the frozen application."""
 
@@ -157,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
     args = build_parser().parse_args(argv)
     try:
         if args.command in {"analyze-video", "debug"}:
@@ -213,14 +232,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "runtime-smoke":
             payload = _runtime_smoke()
-            print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            # Keep this diagnostic safe for direct invocation from a Windows
+            # OEM/charmap console. JSON consumers decode the escaped Unicode.
+            print(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
             return 0 if payload.get("ok") is True else 2
         if args.command == "discover-device":
             from .device_discovery import DeviceDiscovery
 
             adb_path = _portable_tool_path("adb", args.adb_path) or "adb"
             payload = DeviceDiscovery(adb_path).payload()
-            print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            # This output is consumed by portable/START.bat, so it must remain
+            # parseable even when Python inherited a Windows charmap stream.
+            print(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
             return 0 if payload.get("ok") is True else 2
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
