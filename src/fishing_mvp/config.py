@@ -28,6 +28,20 @@ class DetectorConfig:
     gauge_min_aspect: float = 2.4
     gauge_min_width_button_radius: float = 2.2
     gauge_min_color_pixels: int = 80
+    # QTE targets can be much narrower than the original 10% span. Keep
+    # pixel and column-continuity guards so isolated yellow UI noise is not a
+    # target just because it passes the relaxed width threshold.
+    gauge_target_min_color_pixels: int = 24
+    gauge_target_min_width_ratio: float = 0.025
+    gauge_target_min_width_px: int = 6
+    gauge_target_min_column_coverage: float = 0.45
+    gauge_marker_max_width_ratio: float = 0.35
+    # A moving red marker can temporarily occlude a narrow yellow target.
+    # Keep a short, bounded relative envelope instead of trusting one frame.
+    gauge_target_tracking_frames: int = 4
+    gauge_target_tracking_max_width_ratio: float = 0.18
+    gauge_target_tracking_max_gap_ratio: float = 0.06
+    gauge_target_tracking_missing_frames: int = 4
     gauge_min_state_score: float = 0.72
     quality_min_pixels: int = 180
     result_dark_luma: float = 112.0
@@ -62,10 +76,14 @@ class ActionConfig:
     qte_latency_sample_window: int = 5
     qte_velocity_samples: int = 3
     qte_min_velocity_norm_s: float = 0.12
-    # Some reward animations require one additional screen tap after the
-    # detected continue/dismiss control has been pressed.
+    # If a predictive tap lands before the marker is visually observed in the
+    # target, re-arm after this grace window so a later sweep can be retried.
+    qte_prediction_grace_s: float = 0.24
+    # Keep result recovery bounded: retry a detected continue/dismiss control
+    # only while the result overlay is still visibly present.
     result_extra_tap_enabled: bool = True
-    result_extra_tap_delay_s: float = 0.85
+    result_extra_tap_delay_s: float = 1.0
+    result_max_attempts: int = 3
 
 
 @dataclass

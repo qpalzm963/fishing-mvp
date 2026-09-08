@@ -73,7 +73,20 @@ def draw_overlay(
         f"frame={detection.frame_index}  t={detection.timestamp_s:.2f}s  {'analysed' if analysed else 'held'}",
     ]
     if detection.gauge_marker_x is not None:
-        lines.append(f"gauge_marker={detection.gauge_marker_x:.3f} target={detection.gauge_target_range or '-'}")
+        marker_width = (
+            f" width={detection.gauge_marker_width:.3f}"
+            if detection.gauge_marker_width is not None
+            else ""
+        )
+        target_width = (
+            f" target_width={detection.gauge_target_range[1] - detection.gauge_target_range[0]:.3f}"
+            if detection.gauge_target_range is not None
+            else ""
+        )
+        lines.append(
+            f"gauge_marker={detection.gauge_marker_x:.3f}{marker_width} "
+            f"target={detection.gauge_target_range or '-'}{target_width}"
+        )
     panel_height = 42 + 34 * len(lines)
     overlay = output.copy()
     cv2.rectangle(overlay, (0, 0), (output.shape[1], panel_height), (10, 10, 10), -1)

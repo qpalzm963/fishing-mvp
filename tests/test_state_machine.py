@@ -146,6 +146,64 @@ def test_qte_prediction_triggers_before_marker_enters_target():
     assert "now=0.680" in action.reason
 
 
+def test_qte_target_check_adapts_margin_to_narrow_target_and_marker_width():
+    planner = ActionPlanner(ActionConfig(qte_target_margin=0.05))
+
+    assert planner._marker_in_target(0.50, (0.48, 0.52), marker_width=0.02)
+    assert not planner._marker_in_target(0.44, (0.48, 0.52), marker_width=0.02)
+
+
+def test_predictive_qte_miss_rearms_and_can_retry_on_a_later_sweep():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
+    planner = ActionPlanner(
+        ActionConfig(
+            min_confidence=0.5,
+            qte_enabled=True,
+            qte_min_interval_s=0.18,
+            qte_target_margin=0.0,
+            qte_input_latency_s=0.2,
+            qte_velocity_samples=2,
+            qte_min_velocity_norm_s=0.1,
+            qte_prediction_grace_s=0.2,
+        )
+    )
+
+    def qte(index: int, timestamp: float, marker: float) -> Detection:
+        detection = make_detection(index, FishingState.QTE)
+        detection.timestamp_s = timestamp
+        detection.gauge_marker_x = marker
+        detection.gauge_marker_width = 0.02
+        detection.gauge_target_range = (0.48, 0.52)
+        return detection
+
+    first = qte(0, 0.0, 0.86)
+    state, transition = machine.update(first)
+    assert planner.plan(first, state, transition) is None
+
+    predicted_hit = qte(1, 0.1, 0.74)
+    state, transition = machine.update(predicted_hit)
+    first_action = planner.plan(predicted_hit, state, transition)
+    assert first_action is not None
+    assert planner.qte_predicted_only
+
+    before_grace = qte(2, 0.2, 0.76)
+    state, transition = machine.update(before_grace)
+    assert planner.plan(before_grace, state, transition) is None
+    assert planner.qte_in_target
+
+    after_grace = qte(3, 0.35, 0.76)
+    state, transition = machine.update(after_grace)
+    assert planner.plan(after_grace, state, transition) is None
+    assert not planner.qte_in_target
+    assert not planner.qte_predicted_only
+
+    later_sweep = qte(4, 0.50, 0.60)
+    state, transition = machine.update(later_sweep)
+    retry = planner.plan(later_sweep, state, transition)
+    assert retry is not None
+    assert "predicted marker" in retry.reason
+
+
 def test_qte_prediction_uses_frame_age_analysis_and_source_specific_dispatch_latency():
     planner = ActionPlanner(
         ActionConfig(
@@ -204,27 +262,51 @@ def test_qte_action_triggers_once_per_target_entry():
     assert planner.plan(make_detection(3, FishingState.QTE), state, transition) is not None
 
 
-def test_result_continue_action_is_once_per_result_entry():
-    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
-    planner = ActionPlanner(ActionConfig(min_confidence=0.5, auto_continue=True))
-    result = make_detection(0, FishingState.RESULT)
-    result.continue_box = Box(100, 1500, 800, 100)
-    state, transition = machine.update(result)
-    assert planner.plan(result, state, transition) is not None
-
-    same_result = make_detection(1, FishingState.RESULT)
-    same_result.continue_box = result.continue_box
-    state, transition = machine.update(same_result)
-    assert planner.plan(same_result, state, transition) is None
-
-
-def test_result_extra_tap_is_delayed_and_once_per_result_entry():
+def test_result_continue_action_retries_after_result_stays_visible_and_is_bounded():
     machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
     planner = ActionPlanner(
         ActionConfig(
             min_confidence=0.5,
             auto_continue=True,
             result_extra_tap_delay_s=0.8,
+            result_max_attempts=2,
+        )
+    )
+    result = make_detection(0, FishingState.RESULT)
+    result.continue_box = Box(100, 1500, 800, 100)
+    state, transition = machine.update(result)
+    first = planner.plan(result, state, transition)
+    assert first is not None
+    assert first.reason == "stable dynamically detected result continue control"
+
+    same_result = make_detection(1, FishingState.RESULT)
+    same_result.continue_box = result.continue_box
+    state, transition = machine.update(same_result)
+    assert planner.plan(same_result, state, transition) is None
+
+    retry = make_detection(9, FishingState.RESULT)
+    retry.timestamp_s = 0.9
+    retry.continue_box = result.continue_box
+    state, transition = machine.update(retry)
+    second = planner.plan(retry, state, transition)
+    assert second is not None
+    assert second.reason == "dynamic result continue retry #2"
+
+    exhausted = make_detection(18, FishingState.RESULT)
+    exhausted.timestamp_s = 1.8
+    exhausted.continue_box = result.continue_box
+    state, transition = machine.update(exhausted)
+    assert planner.plan(exhausted, state, transition) is None
+
+
+def test_result_fallback_is_used_only_when_no_explicit_continue_control_exists():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
+    planner = ActionPlanner(
+        ActionConfig(
+            min_confidence=0.5,
+            auto_continue=True,
+            result_extra_tap_delay_s=0.8,
+            result_max_attempts=3,
         )
     )
     result = make_detection(0, FishingState.RESULT)
@@ -247,17 +329,45 @@ def test_result_extra_tap_is_delayed_and_once_per_result_entry():
     after_delay.continue_box = result.continue_box
     after_delay.result_fallback_box = result.result_fallback_box
     state, transition = machine.update(after_delay)
-    extra = planner.plan(after_delay, state, transition)
+    retry = planner.plan(after_delay, state, transition)
+    assert retry is not None
+    assert retry.reason == "dynamic result continue retry #2"
+    assert (retry.x, retry.y) == (500, 1550)
+
+    fallback = make_detection(18, FishingState.RESULT)
+    fallback.timestamp_s = 1.8
+    fallback.continue_box = None
+    fallback.result_fallback_box = result.result_fallback_box
+    state, transition = machine.update(fallback)
+    extra = planner.plan(fallback, state, transition)
     assert extra is not None
-    assert extra.reason == "one-time dynamic result reward-overlay dismissal tap"
+    assert extra.reason == "dynamic result reward-overlay fallback #3"
     assert (extra.x, extra.y) == (500, 850)
 
-    later = make_detection(10, FishingState.RESULT)
-    later.timestamp_s = 1.1
+    later = make_detection(20, FishingState.RESULT)
+    later.timestamp_s = 2.0
     later.continue_box = result.continue_box
     later.result_fallback_box = result.result_fallback_box
     state, transition = machine.update(later)
     assert planner.plan(later, state, transition) is None
+
+
+def test_result_retry_requires_raw_result_overlay_while_state_machine_holds_result():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1, result_min_hold_s=2.0))
+    planner = ActionPlanner(
+        ActionConfig(min_confidence=0.5, auto_continue=True, result_extra_tap_delay_s=0.8)
+    )
+    result = make_detection(0, FishingState.RESULT)
+    result.continue_box = Box(100, 1500, 800, 100)
+    state, transition = machine.update(result)
+    assert planner.plan(result, state, transition) is not None
+
+    raw_waiting = make_detection(10, FishingState.WAITING)
+    raw_waiting.timestamp_s = 1.0
+    raw_waiting.action_button = Box(450, 1600, 100, 100)
+    state, transition = machine.update(raw_waiting)
+    assert state == FishingState.RESULT
+    assert planner.plan(raw_waiting, state, transition) is None
 
 
 def test_automation_progress_counts_only_result_to_waiting_as_a_completed_round():

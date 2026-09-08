@@ -27,6 +27,17 @@ detector:
   gauge_min_aspect: 2.4
   gauge_min_width_button_radius: 2.2
   gauge_min_color_pixels: 80
+  # Narrow targets are accepted with pixel and continuity safeguards.
+  gauge_target_min_color_pixels: 24
+  gauge_target_min_width_ratio: 0.025
+  gauge_target_min_width_px: 6
+  gauge_target_min_column_coverage: 0.45
+  gauge_marker_max_width_ratio: 0.35
+  # Bridge short red-marker occlusions without allowing an unbounded target.
+  gauge_target_tracking_frames: 4
+  gauge_target_tracking_max_width_ratio: 0.18
+  gauge_target_tracking_max_gap_ratio: 0.06
+  gauge_target_tracking_missing_frames: 4
   gauge_min_state_score: 0.72
   quality_min_pixels: 180
   result_dark_luma: 112
@@ -54,9 +65,12 @@ action:
   qte_latency_sample_window: 5
   qte_velocity_samples: 3
   qte_min_velocity_norm_s: 0.12
-  # One guarded tap can dismiss reward animations that need an extra screen tap.
+  # Re-arm a predictive tap if visual entry is not observed within this time.
+  qte_prediction_grace_s: 0.24
+  # Re-detect the result control after each tap while the result overlay remains.
   result_extra_tap_enabled: true
-  result_extra_tap_delay_s: 0.85
+  result_extra_tap_delay_s: 1.0
+  result_max_attempts: 3
 
 automation:
   # Full-auto stops instead of waiting forever when a stage is not recognised.

@@ -155,7 +155,7 @@ python -m fishing_mvp live \
 
 `--full-auto` 會自動開啟開始、QTE 與結果流程；`--max-rounds N` 預設為 1，完成 N 次「看過 `RESULT` 後回到 `WAITING`」後停止。若未加 `--live`，即使使用 `--full-auto` 也只會產生動作提案。當狀態長時間無法辨識或某個階段超時，程式會安全停止並在 `live_summary.json` 記錄 `stop_reason`，不會盲點。
 
-部分金色魚／獎勵動畫在第一次按下動態偵測到的繼續或關閉控制後，還需要再點一下結果內容才會解除。若 `RESULT` 仍維持，full-auto 會等待 `result_extra_tap_delay_s`，從中央獎勵內容的輪廓動態推導一個額外點擊位置，最多補點一次；仍未離開就安全停止。這不是固定座標，也不會持續重試。
+部分金色魚／獎勵動畫在第一次按下動態偵測到的繼續或關閉控制後，還需要再確認一次。若 `RESULT` 仍維持，full-auto 會等待 `result_extra_tap_delay_s`，重新偵測當下的繼續／關閉控制並優先點擊它；只有沒有明確控制時，才會使用通過輪廓驗證的中央結果覆蓋層候選。總嘗試次數受 `result_max_attempts` 限制，且只有畫面仍被辨識為結果覆蓋層時才會重試；狀態離開 `RESULT` 後立即停止點擊，避免誤觸釣魚畫面。
 
 安全條件：
 
@@ -164,7 +164,7 @@ python -m fishing_mvp live \
 - ADB 斷線、解析度／方向改變、偵測信心不足或狀態未知時停止或不動作。
 - 程式不會自動啟動、切換、重啟或 force-stop App。
 - `--enable-qte` 採即時單擊事件模型；QTE 速度預測、輸入延遲、點擊間隔與按壓時間可在 YAML 調整。窄目標的 `gauge_target_min_color_pixels`、`gauge_target_min_width_ratio`、`gauge_target_min_width_px` 與 `gauge_target_min_column_coverage` 控制偵測下限；`gauge_marker_max_width_ratio` 避免背景紅色元素被當成 marker 寬度；`gauge_target_tracking_frames`、`gauge_target_tracking_max_width_ratio`、`gauge_target_tracking_max_gap_ratio` 與 `gauge_target_tracking_missing_frames` 控制窄目標的短暫連續追蹤；預測點擊未觀察到實際入框時，會在 `qte_prediction_grace_s` 後重新武裝，保留後續掃掠的補救機會。
-- `result_extra_tap_enabled` 與 `result_extra_tap_delay_s` 控制獎勵動畫的一次性額外點擊；位置由中央結果內容的輪廓動態產生。
+- `result_extra_tap_enabled`、`result_extra_tap_delay_s` 與 `result_max_attempts` 控制結算控制的有限重試；每次位置都由當前畫面的控制或結果輪廓動態產生，且不使用固定座標。
 - `--full-auto` 只會操作已在前景且符合 `--package` 的遊戲；它不會替使用者切換 App。
 - 完整自動化的各階段 timeout 在 `config/default.yaml` 的 `automation` 區段設定；超時會停止，不會改用固定座標猜測。
 

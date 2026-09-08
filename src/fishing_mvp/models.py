@@ -87,6 +87,7 @@ class Detection:
     gauge_box: Box | None = None
     gauge_score: float = 0.0
     gauge_marker_x: float | None = None
+    gauge_marker_width: float | None = None
     gauge_target_range: tuple[float, float] | None = None
     quality: str | None = None
     quality_score: float = 0.0
@@ -126,6 +127,7 @@ class Detection:
             "gauge_box": self.gauge_box.to_dict() if self.gauge_box else None,
             "gauge_score": round(self.gauge_score, 4),
             "gauge_marker_x": round(self.gauge_marker_x, 4) if self.gauge_marker_x is not None else None,
+            "gauge_marker_width": round(self.gauge_marker_width, 4) if self.gauge_marker_width is not None else None,
             "gauge_target_range": list(self.gauge_target_range) if self.gauge_target_range else None,
             "quality": self.quality,
             "quality_score": round(self.quality_score, 4),

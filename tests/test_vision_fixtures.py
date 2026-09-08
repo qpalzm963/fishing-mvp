@@ -4,8 +4,14 @@ import cv2
 import numpy as np
 
 from fishing_mvp.config import DetectorConfig
-from fishing_mvp.models import FishingState
-from fishing_mvp.vision import FrameAnalyzer, color_mask, detect_continue_button, detect_result_fallback_tap
+from fishing_mvp.models import Box, FishingState
+from fishing_mvp.vision import (
+    FrameAnalyzer,
+    _target_range_from_yellow,
+    color_mask,
+    detect_continue_button,
+    detect_result_fallback_tap,
+)
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -46,6 +52,43 @@ def test_qte_fixture_detects_gauge_marker_and_target_range():
     low, high = detection.gauge_target_range
     assert 0.0 <= low < high <= 1.0
     assert 0.0 <= detection.gauge_marker_x <= 1.0
+    assert detection.gauge_marker_width is not None
+    assert detection.features["gauge_target_width"] == round(high - low, 5)
+
+
+def test_narrow_yellow_target_is_accepted_but_sparse_noise_is_rejected():
+    config = DetectorConfig()
+    narrow = np.zeros((12, 120), dtype=np.uint8)
+    narrow[:, 54:62] = 255
+    target = _target_range_from_yellow(narrow, 120, config)
+
+    assert target is not None
+    assert target[1] - target[0] < 0.10
+
+    sparse = np.zeros((12, 120), dtype=np.uint8)
+    for x in (20, 40, 60, 80):
+        sparse[:, x] = 255
+    assert _target_range_from_yellow(sparse, 120, config) is None
+
+
+def test_narrow_target_continuity_bridges_marker_occlusion_without_stale_carryover():
+    config = DetectorConfig(
+        gauge_target_tracking_frames=4,
+        gauge_target_tracking_max_width_ratio=0.18,
+        gauge_target_tracking_max_gap_ratio=0.06,
+    )
+    analyzer = FrameAnalyzer(config)
+    gauge = Box(100, 500, 300, 40)
+
+    assert analyzer._stabilize_target_range(gauge, (0.650, 0.719), 0.08) == (0.650, 0.719)
+    analyzer._stabilize_target_range(gauge, (0.688, 0.719), 0.08)
+    bridged = analyzer._stabilize_target_range(gauge, (0.623, 0.657), 0.08)
+    assert bridged is not None
+    assert bridged[0] == 0.623
+    assert bridged[1] == 0.719
+
+    reset = analyzer._stabilize_target_range(gauge, (0.120, 0.180), 0.08)
+    assert reset == (0.120, 0.180)
 
 
 def test_qte_fast_path_keeps_dynamic_button_and_gauge_detection():
@@ -67,14 +110,16 @@ def test_quality_fixture_detects_quality_label_without_ocr():
     assert detection.gauge_box is not None
 
 
-def test_result_fixture_uses_normalized_yellow_ratio_and_no_false_continue():
+def test_result_fixture_uses_normalized_yellow_ratio_and_detects_bottom_dismiss_icon():
     frame = load_fixture("result")
     config = DetectorConfig()
     detection = FrameAnalyzer(config).analyze(frame, 0, 0.0)
     assert detection.hint == FishingState.RESULT
     assert detection.result_box is not None
     assert detection.features["center_yellow_ratio"] > config.result_yellow_ratio
-    assert detection.continue_box is None
+    assert detection.continue_box is not None
+    assert abs(detection.continue_box.cx / detection.frame_width - 0.5) < 0.1
+    assert detection.continue_box.cy / detection.frame_height > 0.9
     assert detection.result_fallback_box is not None
 
     smaller = cv2.resize(frame, (270, 585), interpolation=cv2.INTER_AREA)
