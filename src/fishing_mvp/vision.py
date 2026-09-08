@@ -506,6 +506,71 @@ def detect_continue_button(frame: np.ndarray, result_visible: bool) -> Box | Non
     return max(icon_candidates, key=lambda item: item[0])[1] if icon_candidates else None
 
 
+def detect_result_fallback_tap(
+    frame: np.ndarray,
+    result_visible: bool,
+    continue_box: Box | None = None,
+) -> Box | None:
+    """Find one safe, dynamic tap target inside a result reward animation.
+
+    A few result variants keep the reward animation on screen after the
+    visible dismiss/continue control is tapped.  The fallback is intentionally
+    limited to the central reward content: it uses the largest compact,
+    high-contrast contour in a ratio-based ROI and never falls back to a fixed
+    screen coordinate.  If no convincing content contour exists, returning
+    ``None`` lets the live runner fail safe instead of guessing.
+    """
+
+    if not result_visible:
+        return None
+    height, width = frame.shape[:2]
+    roi = _clip_box(width * 0.12, height * 0.16, width * 0.76, height * 0.66, width, height)
+    crop = _crop(frame, roi)
+    if crop.size == 0:
+        return None
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 30, 120)
+    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+
+    component_count, _, stats, centroids = cv2.connectedComponentsWithStats(edges, 8)
+    frame_area = float(max(1, width * height))
+    min_area = max(120, int(frame_area * 0.002))
+    candidates: list[tuple[float, Box]] = []
+    for index in range(1, component_count):
+        x, y, box_width, box_height, area = [int(value) for value in stats[index]]
+        if area < min_area or box_width <= 0 or box_height <= 0:
+            continue
+        # Border-touching components are usually the dimmed game background,
+        # dock, or celebration bands rather than the reward object.
+        if x <= 0 or y <= 0 or x + box_width >= roi.w - 1 or y + box_height >= roi.h - 1:
+            continue
+        box = Box(roi.x + x, roi.y + y, box_width, box_height)
+        if continue_box is not None and _overlap_ratio(box, continue_box) >= 0.20:
+            continue
+        center_x = float(centroids[index][0] + roi.x)
+        center_y = float(centroids[index][1] + roi.y)
+        if abs(center_x - width / 2.0) > width * 0.34:
+            continue
+        compactness = float(area / max(1.0, box_width * box_height))
+        area_score = min(1.0, area / max(1.0, frame_area * 0.025))
+        center_score = 1.0 - min(1.0, abs(center_x - width / 2.0) / max(1.0, width * 0.34))
+        vertical_score = 1.0 - min(1.0, abs(center_y - height * 0.48) / max(1.0, height * 0.32))
+        compact_score = min(1.0, compactness / 0.40)
+        score = float(
+            0.38 * area_score
+            + 0.24 * center_score
+            + 0.20 * vertical_score
+            + 0.18 * compact_score
+        )
+        candidates.append((score, box))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 class FrameAnalyzer:
     """State-free visual observations plus a small temporal motion feature."""
 
@@ -576,6 +641,7 @@ class FrameAnalyzer:
             result_score = max(result_score, 0.72)
         result_box = Box(0, 0, width, height) if result_visible else None
         continue_box = detect_continue_button(frame, result_visible)
+        result_fallback_box = detect_result_fallback_tap(frame, result_visible, continue_box)
         water_activity = self._water_activity(gray, work_button)
 
         if result_visible:
@@ -629,6 +695,7 @@ class FrameAnalyzer:
             result_box=result_box,
             result_score=result_score,
             continue_box=continue_box,
+            result_fallback_box=result_fallback_box,
             water_activity=water_activity,
             hint=hint,
             confidence=float(np.clip(confidence, 0.0, 1.0)),

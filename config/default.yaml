@@ -51,6 +51,9 @@ action:
   qte_input_latency_s: 0.18
   qte_velocity_samples: 3
   qte_min_velocity_norm_s: 0.12
+  # One guarded tap can dismiss reward animations that need an extra screen tap.
+  result_extra_tap_enabled: true
+  result_extra_tap_delay_s: 0.85
 
 automation:
   # Full-auto stops instead of waiting forever when a stage is not recognised.

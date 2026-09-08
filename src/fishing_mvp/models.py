@@ -80,6 +80,7 @@ class Detection:
     result_box: Box | None = None
     result_score: float = 0.0
     continue_box: Box | None = None
+    result_fallback_box: Box | None = None
     water_activity: float = 0.0
     hint: FishingState = FishingState.UNKNOWN
     confidence: float = 0.0
@@ -110,6 +111,7 @@ class Detection:
             "result_box": self.result_box.to_dict() if self.result_box else None,
             "result_score": round(self.result_score, 4),
             "continue_box": self.continue_box.to_dict() if self.continue_box else None,
+            "result_fallback_box": self.result_fallback_box.to_dict() if self.result_fallback_box else None,
             "water_activity": round(self.water_activity, 4),
             "hint": self.hint.value,
             "confidence": round(self.confidence, 4),

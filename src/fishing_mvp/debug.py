@@ -52,6 +52,7 @@ def draw_overlay(
     _draw_box(output, detection.gauge_box, (30, 220, 220), f"gauge {detection.gauge_score:.2f}")
     _draw_box(output, detection.result_box, (40, 210, 255), "result")
     _draw_box(output, detection.continue_box, (0, 230, 80), "continue")
+    _draw_box(output, detection.result_fallback_box, (255, 150, 0), "result-extra")
 
     if detection.gauge_box is not None and detection.gauge_marker_x is not None:
         x = int(detection.gauge_box.x + detection.gauge_marker_x * detection.gauge_box.w)

@@ -179,6 +179,48 @@ def test_result_continue_action_is_once_per_result_entry():
     assert planner.plan(same_result, state, transition) is None
 
 
+def test_result_extra_tap_is_delayed_and_once_per_result_entry():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
+    planner = ActionPlanner(
+        ActionConfig(
+            min_confidence=0.5,
+            auto_continue=True,
+            result_extra_tap_delay_s=0.8,
+        )
+    )
+    result = make_detection(0, FishingState.RESULT)
+    result.continue_box = Box(100, 1500, 800, 100)
+    result.result_fallback_box = Box(450, 800, 100, 100)
+    state, transition = machine.update(result)
+    first = planner.plan(result, state, transition)
+    assert first is not None
+    assert "continue control" in first.reason
+
+    before_delay = make_detection(5, FishingState.RESULT)
+    before_delay.timestamp_s = 0.5
+    before_delay.continue_box = result.continue_box
+    before_delay.result_fallback_box = result.result_fallback_box
+    state, transition = machine.update(before_delay)
+    assert planner.plan(before_delay, state, transition) is None
+
+    after_delay = make_detection(9, FishingState.RESULT)
+    after_delay.timestamp_s = 0.9
+    after_delay.continue_box = result.continue_box
+    after_delay.result_fallback_box = result.result_fallback_box
+    state, transition = machine.update(after_delay)
+    extra = planner.plan(after_delay, state, transition)
+    assert extra is not None
+    assert extra.reason == "one-time dynamic result reward-overlay dismissal tap"
+    assert (extra.x, extra.y) == (500, 850)
+
+    later = make_detection(10, FishingState.RESULT)
+    later.timestamp_s = 1.1
+    later.continue_box = result.continue_box
+    later.result_fallback_box = result.result_fallback_box
+    state, transition = machine.update(later)
+    assert planner.plan(later, state, transition) is None
+
+
 def test_automation_progress_counts_only_result_to_waiting_as_a_completed_round():
     progress = AutomationProgress(max_rounds=1)
     progress.observe(FishingState.WAITING, 0.0)

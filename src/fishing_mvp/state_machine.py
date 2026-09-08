@@ -94,6 +94,7 @@ class ActionPlanner:
     qte_seen_inside: bool = False
     qte_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=8))
     result_handled: bool = False
+    result_extra_tap_handled: bool = False
 
     def plan(
         self,
@@ -112,6 +113,7 @@ class ActionPlanner:
             self.qte_samples.clear()
         if state != FishingState.RESULT:
             self.result_handled = False
+            self.result_extra_tap_handled = False
         if detection.confidence < self.config.min_confidence:
             return None
         if (
@@ -199,6 +201,26 @@ class ActionPlanner:
             self.result_handled = True
             self.last_result_timestamp = detection.timestamp_s
             return self._tap_for_box(detection, detection.continue_box, "stable dynamically detected result continue control")
+
+        if (
+            state == FishingState.RESULT
+            and self.config.auto_continue
+            and self.config.result_extra_tap_enabled
+            and self.result_handled
+            and not self.result_extra_tap_handled
+            and detection.result_fallback_box is not None
+            and self._allowed(
+                detection.timestamp_s,
+                self.last_result_timestamp,
+                self.config.result_extra_tap_delay_s,
+            )
+        ):
+            self.result_extra_tap_handled = True
+            return self._tap_for_box(
+                detection,
+                detection.result_fallback_box,
+                "one-time dynamic result reward-overlay dismissal tap",
+            )
         return None
 
     def _marker_in_target(self, marker: float, target: tuple[float, float]) -> bool:

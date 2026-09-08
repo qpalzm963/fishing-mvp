@@ -61,6 +61,10 @@ class ActionConfig:
     qte_input_latency_s: float = 0.18
     qte_velocity_samples: int = 3
     qte_min_velocity_norm_s: float = 0.12
+    # Some reward animations require one additional screen tap after the
+    # detected continue/dismiss control has been pressed.
+    result_extra_tap_enabled: bool = True
+    result_extra_tap_delay_s: float = 0.85
 
 
 @dataclass
