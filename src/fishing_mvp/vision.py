@@ -8,6 +8,7 @@ for prompt and QTE elements in regions relative to that detected control.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -32,6 +33,7 @@ class _GaugeCandidate:
     box: Box
     score: float
     marker_x: float | None
+    marker_width: float | None
     target_range: tuple[float, float] | None
 
 
@@ -397,13 +399,54 @@ def _compact_component_pixels(mask: np.ndarray) -> tuple[int, float]:
     return total, largest
 
 
+def _target_range_from_yellow(
+    yellow_region: np.ndarray,
+    gauge_width: int,
+    config: DetectorConfig,
+) -> tuple[float, float] | None:
+    """Estimate a connected yellow target span in gauge-relative coordinates."""
+
+    if gauge_width <= 1 or yellow_region.size == 0:
+        return None
+    points = cv2.findNonZero(yellow_region)
+    minimum_pixels = max(3, int(config.gauge_target_min_color_pixels))
+    if points is None or len(points) < minimum_pixels:
+        return None
+
+    coordinates = points.reshape(-1, 2)
+    x_pixels = coordinates[:, 0].astype(np.float32)
+    low_px = max(0, int(math.floor(float(np.quantile(x_pixels, 0.05)))))
+    high_px = min(gauge_width - 1, int(math.ceil(float(np.quantile(x_pixels, 0.95)))))
+    if high_px < low_px:
+        return None
+
+    span_pixels = high_px - low_px + 1
+    minimum_span = max(
+        float(max(1, int(config.gauge_target_min_width_px))),
+        gauge_width * max(0.0, float(config.gauge_target_min_width_ratio)),
+    )
+    if span_pixels < minimum_span:
+        return None
+
+    occupied_columns = np.count_nonzero(yellow_region[:, low_px : high_px + 1], axis=0) > 0
+    coverage = float(np.mean(occupied_columns)) if occupied_columns.size else 0.0
+    if coverage < max(0.0, float(config.gauge_target_min_column_coverage)):
+        return None
+
+    denominator = float(max(1, gauge_width - 1))
+    return (
+        float(np.clip(low_px / denominator, 0.0, 1.0)),
+        float(np.clip(high_px / denominator, 0.0, 1.0)),
+    )
+
+
 def detect_gauge(
     frame: np.ndarray,
     button: Box | None,
     config: DetectorConfig,
-) -> tuple[Box | None, float, float | None, tuple[float, float] | None]:
+) -> tuple[Box | None, float, float | None, float | None, tuple[float, float] | None]:
     if button is None:
-        return None, 0.0, None, None
+        return None, 0.0, None, None, None
     height, width = frame.shape[:2]
     radius = max(4.0, min(button.w, button.h) / 2.0)
     roi = _relative_roi(
@@ -460,27 +503,26 @@ def detect_gauge(
     if colour_box is not None and abs(colour_box.cx - button.cx) <= radius * 2.0:
         candidates.append((min(0.82, float(colour_score)), colour_box))
     if not candidates:
-        return None, 0.0, None, None
+        return None, 0.0, None, None, None
     score, box = max(candidates, key=lambda item: item[0])
     local = Box(box.x - roi.x, box.y - roi.y, box.w, box.h)
     red_region = red[local.y : local.bottom, local.x : local.right]
     marker_x: float | None = None
+    marker_width: float | None = None
     red_points = cv2.findNonZero(red_region)
     if red_points is not None and len(red_points) >= 3:
         red_coords = red_points.reshape(-1, 2)
-        marker_x = float(np.mean(red_coords[:, 0]) / max(1, box.w - 1))
+        marker_x = float(np.median(red_coords[:, 0]) / max(1, box.w - 1))
         marker_x = float(np.clip(marker_x, 0.0, 1.0))
+        low_x, high_x = np.quantile(red_coords[:, 0], (0.05, 0.95))
+        marker_span_px = int(math.ceil(float(high_x)) - math.floor(float(low_x)) + 1)
+        candidate_width = marker_span_px / max(1, box.w)
+        if candidate_width <= max(0.0, config.gauge_marker_max_width_ratio):
+            marker_width = float(np.clip(candidate_width, 0.0, 1.0))
 
     yellow_region = yellow[local.y : local.bottom, local.x : local.right]
-    yellow_points = cv2.findNonZero(yellow_region)
-    target_range: tuple[float, float] | None = None
-    if yellow_points is not None and len(yellow_points) >= config.gauge_min_color_pixels:
-        yellow_coords = yellow_points.reshape(-1, 2)
-        xs = yellow_coords[:, 0].astype(np.float32) / max(1, box.w - 1)
-        low, high = float(np.quantile(xs, 0.05)), float(np.quantile(xs, 0.95))
-        if high - low >= 0.10:
-            target_range = (float(np.clip(low, 0.0, 1.0)), float(np.clip(high, 0.0, 1.0)))
-    return box, score, marker_x, target_range
+    target_range = _target_range_from_yellow(yellow_region, box.w, config)
+    return box, score, marker_x, marker_width, target_range
 
 
 def detect_quality(
@@ -547,28 +589,41 @@ def detect_continue_button(frame: np.ndarray, result_visible: bool) -> Box | Non
     if candidates:
         return max(candidates, key=lambda item: item[0])[1]
 
-    # Some result variants use a small grey dismiss/continue X instead of a
-    # green bar.  Detect its high-contrast compact contour relative to the
-    # bottom-center of the current framebuffer; do not fall back to a fixed
-    # coordinate or an unconditional center tap.
+    # Some result variants use a small dismiss/continue X instead of a green
+    # bar. The icon can be near-black in a dimmed result frame or bright white
+    # during the reward animation, so inspect several luminance bands. Every
+    # candidate is still constrained by the current framebuffer's relative
+    # bottom-center geometry; this is not a fixed coordinate fallback.
     icon_roi = _clip_box(width * 0.30, height * 0.92, width * 0.40, height * 0.075, width, height)
     icon_crop = _crop(frame, icon_roi)
     gray = cv2.cvtColor(icon_crop, cv2.COLOR_BGR2GRAY)
-    icon_mask = cv2.inRange(gray, 20, 130)
-    icon_mask = cv2.morphologyEx(icon_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    icon_mask = cv2.morphologyEx(icon_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     icon_candidates: list[tuple[float, Box]] = []
-    for contour in _contours(icon_mask):
-        x, y, w, h = cv2.boundingRect(contour)
-        area = cv2.contourArea(contour)
-        if area < 80 or w <= 0 or h <= 0 or not 0.35 <= w / float(h) <= 2.8:
-            continue
-        box = Box(icon_roi.x + x, icon_roi.y + y, w, h)
-        if abs(box.cx - width / 2.0) > width * 0.12:
-            continue
-        fill = area / max(1.0, w * h)
-        center_score = 1.0 - min(1.0, abs(box.cx - width / 2.0) / max(1.0, width * 0.12))
-        icon_candidates.append((float(np.clip(0.65 * fill + 0.35 * center_score, 0.0, 1.0)), box))
+    min_area = max(40, int(width * height * 0.00005))
+    for low, high in ((5, 80), (8, 120), (20, 130), (130, 255), (180, 255)):
+        icon_mask = cv2.inRange(gray, low, high)
+        icon_mask = cv2.morphologyEx(icon_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        icon_mask = cv2.morphologyEx(icon_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        for contour in _contours(icon_mask):
+            x, y, w, h = cv2.boundingRect(contour)
+            area = cv2.contourArea(contour)
+            if (
+                area < min_area
+                or w <= 0
+                or h <= 0
+                or not 0.35 <= w / float(h) <= 2.8
+                or w > width * 0.18
+                or h > height * 0.10
+            ):
+                continue
+            box = Box(icon_roi.x + x, icon_roi.y + y, w, h)
+            if box.cy < height * 0.94 or abs(box.cx - width / 2.0) > width * 0.12:
+                continue
+            fill = area / max(1.0, w * h)
+            density = cv2.countNonZero(icon_mask[y : y + h, x : x + w]) / max(1.0, w * h)
+            center_score = 1.0 - min(1.0, abs(box.cx - width / 2.0) / max(1.0, width * 0.12))
+            vertical_score = 1.0 - min(1.0, abs(box.cy - height * 0.965) / max(1.0, height * 0.035))
+            score = 0.45 * center_score + 0.25 * vertical_score + 0.30 * min(1.0, max(fill, density) / 0.35)
+            icon_candidates.append((float(np.clip(score, 0.0, 1.0)), box))
     return max(icon_candidates, key=lambda item: item[0])[1] if icon_candidates else None
 
 
@@ -638,13 +693,102 @@ def detect_result_fallback_tap(
 
 
 class FrameAnalyzer:
-    """State-free visual observations plus a small temporal motion feature."""
+    """Visual observations with bounded temporal continuity for moving UI."""
 
     def __init__(self, config: DetectorConfig):
         self.config = config
         self.previous_gray: np.ndarray | None = None
         self.previous_button_work: Box | None = None
         self.previous_work_size: tuple[int, int] | None = None
+        self.previous_gauge_work: Box | None = None
+        self.target_range_history: deque[tuple[float, float]] = deque(
+            maxlen=max(1, int(config.gauge_target_tracking_frames))
+        )
+        self.target_range_missing_frames = 0
+
+    @staticmethod
+    def _gauge_is_continuous(previous: Box | None, current: Box) -> bool:
+        if previous is None:
+            return False
+        width = max(1.0, float(previous.w), float(current.w))
+        height = max(1.0, float(previous.h), float(current.h))
+        return (
+            abs(previous.cx - current.cx) <= width * 0.14
+            and abs(previous.cy - current.cy) <= height * 0.80
+            and abs(previous.w - current.w) <= width * 0.18
+            and abs(previous.h - current.h) <= height * 0.55
+        )
+
+    @staticmethod
+    def _target_envelope(ranges: Iterable[tuple[float, float]]) -> tuple[float, float] | None:
+        values = list(ranges)
+        if not values:
+            return None
+        return min(item[0] for item in values), max(item[1] for item in values)
+
+    def _stabilize_target_range(
+        self,
+        gauge: Box | None,
+        target_range: tuple[float, float] | None,
+        marker_width: float | None,
+    ) -> tuple[float, float] | None:
+        """Bridge short target occlusions while bounding target expansion.
+
+        The yellow target is sometimes partly hidden by the red marker.  A
+        short relative envelope recovers the union of nearby visible pieces;
+        a large jump, a changed gauge, or an over-wide envelope starts a new
+        target instead of carrying stale state across QTE steps.
+        """
+
+        if gauge is None:
+            self.previous_gauge_work = None
+            self.target_range_history.clear()
+            self.target_range_missing_frames = 0
+            return None
+
+        if not self._gauge_is_continuous(self.previous_gauge_work, gauge):
+            self.target_range_history.clear()
+            self.target_range_missing_frames = 0
+        self.previous_gauge_work = gauge
+
+        if target_range is None:
+            self.target_range_missing_frames += 1
+            if (
+                self.target_range_history
+                and self.target_range_missing_frames
+                <= max(0, int(self.config.gauge_target_tracking_missing_frames))
+            ):
+                return self._target_envelope(self.target_range_history)
+            self.target_range_history.clear()
+            return None
+
+        self.target_range_missing_frames = 0
+        low, high = sorted((float(target_range[0]), float(target_range[1])))
+        current = (float(np.clip(low, 0.0, 1.0)), float(np.clip(high, 0.0, 1.0)))
+        if current[1] <= current[0]:
+            self.target_range_history.clear()
+            return None
+        if not self.target_range_history:
+            self.target_range_history.append(current)
+            return current
+
+        previous = self._target_envelope(self.target_range_history)
+        assert previous is not None
+        overlap = min(previous[1], current[1]) - max(previous[0], current[0])
+        gap = max(0.0, max(previous[0], current[0]) - min(previous[1], current[1]))
+        union = (min(previous[0], current[0]), max(previous[1], current[1]))
+        marker_gap = max(0.0, float(marker_width or 0.0)) * 0.75
+        allowed_gap = max(float(self.config.gauge_target_tracking_max_gap_ratio), marker_gap)
+        allowed_width = max(0.0, float(self.config.gauge_target_tracking_max_width_ratio))
+
+        if union[1] - union[0] <= allowed_width and (overlap >= 0.0 or gap <= allowed_gap):
+            self.target_range_history.append(current)
+            envelope = self._target_envelope(self.target_range_history)
+            return envelope or current
+
+        self.target_range_history.clear()
+        self.target_range_history.append(current)
+        return current
 
     def _water_activity(self, gray: np.ndarray, button: Box | None) -> float:
         small = cv2.resize(gray, (160, max(80, int(round(gray.shape[0] * 160 / gray.shape[1])))), interpolation=cv2.INTER_AREA)
@@ -681,12 +825,13 @@ class FrameAnalyzer:
         self.previous_button_work = work_button
         self.previous_work_size = (work_w, work_h)
         work_prompt, prompt_score = detect_prompt(work, work_button, self.config)
-        work_gauge, gauge_score, marker_x, target_range = detect_gauge(work, work_button, self.config)
+        work_gauge, gauge_score, marker_x, marker_width, target_range = detect_gauge(work, work_button, self.config)
         prompt_progress = _overlap_ratio(work_prompt, work_gauge) >= 0.30
         if prompt_progress:
             # The prompt itself contains a yellow progress strip.  It is not
             # the later QTE bar and must not trigger QTE/quality states.
-            work_gauge, gauge_score, marker_x, target_range = None, 0.0, None, None
+            work_gauge, gauge_score, marker_x, marker_width, target_range = None, 0.0, None, None, None
+        target_range = self._stabilize_target_range(work_gauge, target_range, marker_width)
         work_quality, quality_score, quality_pixels = detect_quality(work, work_button, work_gauge, self.config)
         gauge_state_visible = work_gauge is not None and gauge_score >= self.config.gauge_min_state_score
         quality_state_visible = work_quality is not None and gauge_state_visible
@@ -753,6 +898,9 @@ class FrameAnalyzer:
             "center_yellow_ratio": round(yellow_ratio, 6),
             "quality_pixels": quality_pixels,
             "prompt_progress": prompt_progress,
+            "gauge_marker_width": round(marker_width, 5) if marker_width is not None else None,
+            "gauge_target_width": round(target_range[1] - target_range[0], 5) if target_range else None,
+            "gauge_target_track_samples": len(self.target_range_history),
             **button_features,
         }
         return Detection(
@@ -768,6 +916,7 @@ class FrameAnalyzer:
             gauge_box=gauge,
             gauge_score=gauge_score,
             gauge_marker_x=marker_x,
+            gauge_marker_width=marker_width,
             gauge_target_range=target_range,
             quality=work_quality,
             quality_score=quality_score,

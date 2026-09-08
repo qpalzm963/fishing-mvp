@@ -133,6 +133,8 @@ def run_live(
     capture_mode: str = "auto",
     full_auto: bool = False,
     max_rounds: int | None = None,
+    adb_path: str | None = None,
+    scrcpy_executable: str | None = None,
 ) -> dict[str, Any]:
     output_dir = Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -144,7 +146,7 @@ def run_live(
     config.action.auto_start = bool(full_auto)
     config.action.qte_enabled = effective_qte
     config.action.auto_continue = effective_continue
-    controller = ADBController(serial)
+    controller = ADBController(serial, adb_path=adb_path or "adb")
     controller.assert_connected()
     if package is not None:
         foreground = controller.foreground_package()
@@ -160,6 +162,7 @@ def run_live(
         scrcpy_video_bit_rate=config.scrcpy.video_bit_rate,
         scrcpy_connect_timeout_s=config.scrcpy.connect_timeout_s,
         scrcpy_frame_timeout_s=config.scrcpy.frame_timeout_s,
+        scrcpy_executable=scrcpy_executable,
     )
     analyzer = FrameAnalyzer(config.detector)
     machine = FishingStateMachine(config.state_machine)
@@ -368,7 +371,7 @@ def run_live(
         "actions": actions,
         "input_path_counts": input_path_counts,
         "qte_dispatch_latency_estimates_ms": planner.latency_estimates(),
-        "scrcpy": scrcpy_status(),
+        "scrcpy": scrcpy_status(scrcpy_executable),
         "log": str(log_path),
         "notes": [
             "Live runner stops on ADB errors, foreground changes, or screen-size changes.",

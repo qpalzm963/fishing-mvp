@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "product": "fishing-mvp",
+  "package_kind": "windows-x64-pyinstaller-onedir",
+  "python_entrypoint": "runtime/FishingMVP.exe",
+  "launcher": "runtime/fishing-mvp.cmd",
+  "root_launchers": ["START.bat", "STOP.bat", "使用說明.txt"],
+  "config_template": "config/default.yaml",
+  "build_contract": {
+    "pyinstaller": "6.13.0",
+    "python_runtime": ">=3.10,<3.14",
+    "python_constraints": "packaging/constraints-windows.txt",
+    "python_dependencies": {
+      "numpy": "2.5.3",
+      "opencv-python-headless": "5.0.0.93",
+      "PyYAML": "6.0.3",
+      "av": "18.1.0",
+      "pytest": "9.1.1"
+    },
+    "scrcpy_version": "4.1",
+    "scrcpy_archive": "scrcpy-win64-v4.1.zip",
+    "scrcpy_release_url": "https://github.com/Genymobile/scrcpy/releases/download/v4.1/scrcpy-win64-v4.1.zip",
+    "scrcpy_archive_sha256": "5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db"
+  },
+  "runtime_contract": {
+    "official_distribution_copy_policy": "copy every file from the verified scrcpy archive root into runtime/scrcpy",
+    "required_official_files": [
+      "runtime/scrcpy/scrcpy.exe",
+      "runtime/scrcpy/scrcpy-server",
+      "runtime/scrcpy/adb.exe",
+      "runtime/scrcpy/AdbWinApi.dll",
+      "runtime/scrcpy/AdbWinUsbApi.dll"
+    ],
+    "system_scrcpy_or_adb_required": false,
+    "frozen_runtime_sets_local_tool_path": true,
+    "use_launcher_for_local_tool_path": true
+  }
+}

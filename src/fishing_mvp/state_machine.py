@@ -106,10 +106,12 @@ class ActionPlanner:
     prompt_handled: bool = False
     qte_in_target: bool = False
     qte_seen_inside: bool = False
+    qte_predicted_only: bool = False
     qte_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=8))
     dispatch_latency_samples: dict[str, deque[float]] = field(default_factory=dict)
     result_handled: bool = False
     result_extra_tap_handled: bool = False
+    result_attempts: int = 0
 
     def plan(
         self,
@@ -125,10 +127,12 @@ class ActionPlanner:
         if state != FishingState.QTE:
             self.qte_in_target = False
             self.qte_seen_inside = False
+            self.qte_predicted_only = False
             self.qte_samples.clear()
         if state != FishingState.RESULT:
             self.result_handled = False
             self.result_extra_tap_handled = False
+            self.result_attempts = 0
         if detection.confidence < self.config.min_confidence:
             return None
         if (
@@ -172,15 +176,31 @@ class ActionPlanner:
             and detection.gauge_target_range is not None
         ):
             predicted, velocity, horizon = self._predict_marker(detection)
-            in_target = self._marker_in_target(detection.gauge_marker_x, detection.gauge_target_range)
+            in_target = self._marker_in_target(
+                detection.gauge_marker_x,
+                detection.gauge_target_range,
+                detection.gauge_marker_width,
+            )
             if self.qte_in_target and in_target:
                 self.qte_seen_inside = True
+                self.qte_predicted_only = False
             elif self.qte_in_target and self.qte_seen_inside and not in_target:
-                # A complete target crossing re-arms the next sweep.  When a
-                # predictive tap fires before visual entry, keep the latch
-                # until the marker has actually been observed inside once.
+                # A complete target crossing re-arms the next sweep.
                 self.qte_in_target = False
                 self.qte_seen_inside = False
+                self.qte_predicted_only = False
+            elif (
+                self.qte_in_target
+                and self.qte_predicted_only
+                and self.last_qte_timestamp >= 0
+                and detection.timestamp_s - self.last_qte_timestamp >= max(0.0, self.config.qte_prediction_grace_s)
+            ):
+                # A predictive tap can miss without the marker ever being
+                # observed inside the target. Re-arm after a short grace
+                # window so a later sweep can produce a guarded retry.
+                self.qte_in_target = False
+                self.qte_seen_inside = False
+                self.qte_predicted_only = False
 
             if not self.qte_in_target:
                 should_tap = False
@@ -203,39 +223,52 @@ class ActionPlanner:
                 ):
                     self.qte_in_target = True
                     self.qte_seen_inside = in_target
+                    self.qte_predicted_only = not in_target
                     self.last_qte_timestamp = detection.timestamp_s
                     return self._tap_for_box(detection, detection.action_button, reason)
 
         if (
             state == FishingState.RESULT
             and self.config.auto_continue
-            and not self.result_handled
-            and detection.continue_box is not None
-            and self._allowed(detection.timestamp_s, self.last_result_timestamp, self.config.min_action_interval_s)
+            # The state machine deliberately holds RESULT for a short
+            # animation window. Do not tap again when the raw detector has
+            # already left the result overlay during that hold.
+            and detection.result_box is not None
         ):
-            self.result_handled = True
-            self.last_result_timestamp = detection.timestamp_s
-            return self._tap_for_box(detection, detection.continue_box, "stable dynamically detected result continue control")
-
-        if (
-            state == FishingState.RESULT
-            and self.config.auto_continue
-            and self.config.result_extra_tap_enabled
-            and self.result_handled
-            and not self.result_extra_tap_handled
-            and detection.result_fallback_box is not None
-            and self._allowed(
-                detection.timestamp_s,
-                self.last_result_timestamp,
-                self.config.result_extra_tap_delay_s,
-            )
-        ):
-            self.result_extra_tap_handled = True
-            return self._tap_for_box(
-                detection,
-                detection.result_fallback_box,
-                "one-time dynamic result reward-overlay dismissal tap",
-            )
+            max_attempts = max(1, int(self.config.result_max_attempts))
+            if not self.config.result_extra_tap_enabled:
+                max_attempts = 1
+            next_attempt = self.result_attempts + 1
+            if next_attempt <= max_attempts:
+                delay = (
+                    self.config.min_action_interval_s
+                    if self.result_attempts == 0
+                    else self.config.result_extra_tap_delay_s
+                )
+                if self._allowed(detection.timestamp_s, self.last_result_timestamp, delay):
+                    target = detection.continue_box
+                    if target is not None:
+                        reason = (
+                            "stable dynamically detected result continue control"
+                            if next_attempt == 1
+                            else f"dynamic result continue retry #{next_attempt}"
+                        )
+                    elif detection.result_fallback_box is not None and not self.result_extra_tap_handled:
+                        # Only use the reward-content fallback when no
+                        # explicit continue/dismiss control is visible. It is
+                        # bounded by the same attempt limit and is never
+                        # preferred over a detected control.
+                        target = detection.result_fallback_box
+                        self.result_extra_tap_handled = True
+                        reason = f"dynamic result reward-overlay fallback #{next_attempt}"
+                    else:
+                        target = None
+                        reason = ""
+                    if target is not None:
+                        self.result_attempts = next_attempt
+                        self.result_handled = True
+                        self.last_result_timestamp = detection.timestamp_s
+                        return self._tap_for_box(detection, target, reason)
         return None
 
     def record_input_dispatch(self, source_mode: str, latency_s: float) -> None:
@@ -260,9 +293,28 @@ class ActionPlanner:
             if samples
         }
 
-    def _marker_in_target(self, marker: float, target: tuple[float, float]) -> bool:
-        margin = max(0.0, self.config.qte_target_margin)
-        return target[0] - margin <= marker <= target[1] + margin
+    def _marker_in_target(
+        self,
+        marker: float,
+        target: tuple[float, float],
+        marker_width: float | None = None,
+    ) -> bool:
+        """Check a marker against a target using both centers and widths."""
+
+        low, high = sorted(target)
+        if high <= low:
+            return False
+        target_center = (low + high) / 2.0
+        target_half_width = (high - low) / 2.0
+        marker_half_width = max(0.0, marker_width or 0.0) / 2.0
+        safe_half_width = max(0.0, target_half_width - marker_half_width)
+        # A fixed margin is too permissive for a narrow target. Retain it as
+        # an upper bound, scaled to the target's actual width.
+        margin = min(
+            max(0.0, self.config.qte_target_margin),
+            max(target_half_width * 0.75, marker_half_width * 0.5),
+        )
+        return abs(marker - target_center) <= safe_half_width + margin
 
     def _predict_marker(self, detection: Detection) -> tuple[float | None, float | None, float]:
         """Predict marker position when the Android input will land.
