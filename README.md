@@ -8,7 +8,7 @@ Python + OpenCV + ADB 的動態釣魚 UI 偵測 MVP。專案針對錄影中的�
 
 `waiting` → `prompt`（紫色圓形控制與「就是現在！用力拉！！」）→ `casting` → `result`，以及 `waiting` → `qte`（30 秒倒數與水平色帶）→ `quality`（Cool / Great / Perfect）→ `result`。
 
-偵測器不依賴影片的固定點擊座標。它會先以 Hough circle／輪廓找出下方大型圓形 action control，再用該控制的半徑與中心推導 prompt、QTE bar、游標與結算控制的相對搜尋區域。顏色以 HSV mask 為主，時序狀態用連續穩定幀抑制閃爍；Template Matching 沒有被設為控制決策的必要條件。
+偵測器不依賴影片的固定點擊座標。它會先以 Hough circle／輪廓找出下方大型圓形 action control，再用該控制的半徑與中心推導 prompt、QTE bar、游標與結算控制的相對搜尋區域。顏色以可由 YAML 調整的 HSV mask 為主，結算的黃色元素使用 normalized area ratio，時序狀態用連續穩定幀抑制閃爍；Template Matching 沒有被設為控制決策的必要條件。
 
 ## 安裝
 
@@ -54,7 +54,7 @@ python -m fishing_mvp debug \
 
 分析影片時，所有 action 都只會被記錄成 proposal，不會執行 ADB 點擊。
 
-本次提供的影片驗證產物在 `outputs/fishing_1000018497_final/`。以 12 FPS 取樣的狀態轉移為：
+本次提供的影片驗證產物在 `outputs/fishing_1000018497_reviewed_final/`。以 12 FPS 取樣的狀態轉移為：
 
 ```text
 0.31s waiting
@@ -120,5 +120,7 @@ python -m pytest
 ```
 
 測試涵蓋 HSV mask、normalized geometry、狀態機穩定幀／unknown grace、action cooldown 與安全模式。影片驗證是以可重現的狀態時間線與 annotated output 為主，並不把未標註影片宣稱為正式 precision／recall benchmark。
+
+`tests/fixtures/` 包含從測試影片抽出的少量 waiting、prompt、QTE、quality、result 影格，直接回歸 action button、prompt、gauge、marker、quality、result 與 continue 偵測；完整影片不需要放進 repository。GitHub Actions 會在 Python 3.10 與 3.12 執行安裝、pytest 與 compileall。
 
 這次工作環境當下沒有連線 ADB 裝置，且沒有預裝 OpenCV、pytest 或 scrcpy；依賴安裝後可完成離線驗證，live 仍需使用者提供裝置與 package 才能做實機 smoke test。

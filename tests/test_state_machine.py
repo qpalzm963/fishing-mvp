@@ -47,6 +47,26 @@ def test_prompt_action_is_derived_from_button_center_and_cooldown():
     assert planner.plan(make_detection(1, FishingState.PROMPT), state, transition) is None
 
 
+def test_prompt_action_retries_until_a_confident_frame_then_handles_session():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
+    planner = ActionPlanner(ActionConfig(min_confidence=0.68, tap_hold_ms=80))
+
+    state, transition = machine.update(make_detection(0, FishingState.PROMPT, confidence=0.40))
+    assert planner.plan(make_detection(0, FishingState.PROMPT, confidence=0.40), state, transition) is None
+
+    state, transition = machine.update(make_detection(1, FishingState.PROMPT, confidence=0.90))
+    action = planner.plan(make_detection(1, FishingState.PROMPT, confidence=0.90), state, transition)
+    assert action is not None
+
+    state, transition = machine.update(make_detection(2, FishingState.PROMPT, confidence=0.95))
+    assert planner.plan(make_detection(2, FishingState.PROMPT, confidence=0.95), state, transition) is None
+
+    state, transition = machine.update(make_detection(6, FishingState.WAITING))
+    assert planner.plan(make_detection(6, FishingState.WAITING), state, transition) is None
+    state, transition = machine.update(make_detection(7, FishingState.PROMPT, confidence=0.90))
+    assert planner.plan(make_detection(7, FishingState.PROMPT, confidence=0.90), state, transition) is not None
+
+
 def test_qte_actions_are_opt_in():
     machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
     disabled = ActionPlanner(ActionConfig(min_confidence=0.5, qte_enabled=False))

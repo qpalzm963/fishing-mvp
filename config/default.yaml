@@ -17,7 +17,7 @@ detector:
   gauge_min_color_pixels: 80
   quality_min_pixels: 180
   result_dark_luma: 112
-  result_yellow_pixels: 500
+  result_yellow_ratio: 0.010
   motion_threshold: 22
   motion_min_ratio: 0.04
 

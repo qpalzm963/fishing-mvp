@@ -86,6 +86,7 @@ class ActionPlanner:
     last_action_timestamp: float = -1.0
     last_qte_timestamp: float = -1.0
     last_result_timestamp: float = -1.0
+    prompt_handled: bool = False
 
     def plan(
         self,
@@ -93,16 +94,18 @@ class ActionPlanner:
         state: FishingState,
         transition: StateTransition | None = None,
     ) -> Action | None:
+        if state != FishingState.PROMPT:
+            self.prompt_handled = False
         if detection.confidence < self.config.min_confidence:
             return None
-        is_new_prompt = transition is not None and transition.to_state == FishingState.PROMPT
         if (
             state == FishingState.PROMPT
-            and is_new_prompt
+            and not self.prompt_handled
             and detection.action_button is not None
             and detection.action_active
             and self._allowed(detection.timestamp_s, self.last_action_timestamp, self.config.min_action_interval_s)
         ):
+            self.prompt_handled = True
             self.last_action_timestamp = detection.timestamp_s
             return self._tap_for_box(
                 detection,

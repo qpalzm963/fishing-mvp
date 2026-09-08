@@ -79,7 +79,13 @@ def _hsv_mask(hsv: np.ndarray, ranges: Iterable[tuple[int, int, int, int, int, i
     return result
 
 
-def color_mask(frame: np.ndarray, color: str, *, assume_hsv: bool = False) -> np.ndarray:
+def color_mask(
+    frame: np.ndarray,
+    color: str,
+    *,
+    assume_hsv: bool = False,
+    config: DetectorConfig | None = None,
+) -> np.ndarray:
     """Return a named HSV mask; exposed for small deterministic unit tests."""
 
     hsv = frame if assume_hsv else cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -92,6 +98,15 @@ def color_mask(frame: np.ndarray, color: str, *, assume_hsv: bool = False) -> np
         "orange": ((3, 27, 95, 255, 100, 255),),
         "green": ((35, 95, 75, 255, 80, 255),),
     }
+    if config is not None:
+        ranges["purple"] = ((
+            config.purple_hue_low,
+            config.purple_hue_high,
+            config.min_saturation,
+            255,
+            config.min_value,
+            255,
+        ),)
     if color not in ranges:
         raise ValueError(f"Unknown color mask: {color}")
     return _hsv_mask(hsv, ranges[color])
@@ -114,7 +129,13 @@ def _restore_box(box: Box | None, scale: float, frame_w: int, frame_h: int) -> B
     return _clip_box(box.x / scale, box.y / scale, box.w / scale, box.h / scale, frame_w, frame_h)
 
 
-def _button_colour_metrics(hsv: np.ndarray, cx: int, cy: int, radius: float) -> tuple[float, float]:
+def _button_colour_metrics(
+    hsv: np.ndarray,
+    cx: int,
+    cy: int,
+    radius: float,
+    config: DetectorConfig,
+) -> tuple[float, float]:
     height, width = hsv.shape[:2]
     r = max(2, int(radius * 0.92))
     box = _clip_box(cx - r, cy - r, 2 * r, 2 * r, width, height)
@@ -125,7 +146,7 @@ def _button_colour_metrics(hsv: np.ndarray, cx: int, cy: int, radius: float) -> 
     center_x = crop.shape[1] / 2.0
     center_y = crop.shape[0] / 2.0
     circle = (xx - center_x) ** 2 + (yy - center_y) ** 2 <= (min(crop.shape[:2]) * 0.48) ** 2
-    purple = _hsv_mask(crop, ((125, 179, 45, 255, 45, 255),)) > 0
+    purple = color_mask(crop, "purple", assume_hsv=True, config=config) > 0
     purple_ratio = float(np.mean(purple[circle])) if np.any(circle) else 0.0
     mean_saturation = float(np.mean(crop[:, :, 1][circle])) if np.any(circle) else 0.0
     return purple_ratio, mean_saturation
@@ -165,7 +186,7 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
             y_ratio = raw_cy / max(1, height)
             if y_ratio < config.button_min_y_ratio or y_ratio > config.button_max_y_ratio:
                 continue
-            purple_ratio, sat = _button_colour_metrics(hsv, raw_cx, raw_cy, raw_radius)
+            purple_ratio, sat = _button_colour_metrics(hsv, raw_cx, raw_cy, raw_radius, config)
             score = _score_button(width, height, raw_cx, raw_cy, raw_radius, purple_ratio, sat)
             box = _clip_box(
                 raw_cx - raw_radius,
@@ -195,7 +216,7 @@ def detect_action_button(frame: np.ndarray, config: DetectorConfig) -> tuple[Box
         y_ratio = cy / max(1, height)
         if y_ratio < config.button_min_y_ratio or y_ratio > config.button_max_y_ratio or not (min_radius <= radius <= max_radius):
             continue
-        purple_ratio, sat = _button_colour_metrics(hsv, int(cx), int(cy), radius)
+        purple_ratio, sat = _button_colour_metrics(hsv, int(cx), int(cy), radius, config)
         score = _score_button(width, height, cx, cy, radius, purple_ratio, sat) * min(1.0, circularity)
         box = _clip_box(cx - radius, cy - radius, radius * 2, radius * 2, width, height)
         candidates.append(_ButtonCandidate(box, radius, score, purple_ratio, sat))
@@ -237,7 +258,7 @@ def detect_prompt(frame: np.ndarray, button: Box | None, config: DetectorConfig)
         height,
     )
     hsv = cv2.cvtColor(_crop(frame, roi), cv2.COLOR_BGR2HSV)
-    mask = color_mask(hsv, "purple", assume_hsv=True)
+    mask = color_mask(hsv, "purple", assume_hsv=True, config=config)
     kernel_size = max(3, int(round(radius * 0.08)) | 1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((kernel_size, kernel_size), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
@@ -435,18 +456,23 @@ def detect_continue_button(frame: np.ndarray, result_visible: bool) -> Box | Non
     height, width = frame.shape[:2]
     roi = _clip_box(0, height * 0.52, width, height * 0.45, width, height)
     crop = _crop(frame, roi)
-    masks = [color_mask(crop, "green"), color_mask(crop, "yellow")]
-    combined = masks[0]
-    combined = cv2.bitwise_or(combined, masks[1])
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((9, 15), np.uint8))
+    # Keep this opt-in path conservative.  The result screen contains many
+    # yellow reward/weight elements, so a yellow-only match could tap a
+    # reward label.  A continue control must be a wide, compact green
+    # control; callers still need to explicitly enable auto-continue.
+    green = color_mask(crop, "green")
+    combined = cv2.morphologyEx(green, cv2.MORPH_CLOSE, np.ones((9, 15), np.uint8))
     candidates: list[tuple[float, Box]] = []
     for contour in _contours(combined):
         x, y, w, h = cv2.boundingRect(contour)
         if h <= 0 or w / float(h) < 2.0 or w < width * 0.18:
             continue
+        green_ratio = cv2.countNonZero(green[y : y + h, x : x + w]) / max(1.0, w * h)
+        if green_ratio < 0.20:
+            continue
         fill = cv2.contourArea(contour) / max(1.0, w * h)
         box = Box(roi.x + x, roi.y + y, w, h)
-        candidates.append((float(np.clip(fill, 0.0, 1.0)), box))
+        candidates.append((float(np.clip(0.65 * fill + 0.35 * green_ratio, 0.0, 1.0)), box))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
@@ -500,14 +526,19 @@ class FrameAnalyzer:
         center_yellow = color_mask(_crop(frame, center), "yellow")
         yellow_pixels = int(cv2.countNonZero(center_yellow))
         dark_ratio = float(np.mean(original_gray < 82))
+        yellow_ratio = float(yellow_pixels / max(1, center.area))
         result_score = float(np.clip(
             0.55 * _ratio(self.config.result_dark_luma - luma, 0.0, self.config.result_dark_luma * 0.52)
-            + 0.45 * _ratio(yellow_pixels, self.config.result_yellow_pixels * 0.45, self.config.result_yellow_pixels * 2.0),
+            + 0.45 * _ratio(
+                yellow_ratio,
+                self.config.result_yellow_ratio * 0.45,
+                self.config.result_yellow_ratio * 2.0,
+            ),
             0.0,
             1.0,
         ))
-        result_visible = (luma <= self.config.result_dark_luma and yellow_pixels >= self.config.result_yellow_pixels) or (
-            dark_ratio >= 0.48 and yellow_pixels >= int(self.config.result_yellow_pixels * 0.7)
+        result_visible = (luma <= self.config.result_dark_luma and yellow_ratio >= self.config.result_yellow_ratio) or (
+            dark_ratio >= 0.48 and yellow_ratio >= self.config.result_yellow_ratio * 0.7
         )
         if result_visible:
             result_score = max(result_score, 0.72)
@@ -542,6 +573,7 @@ class FrameAnalyzer:
             "luma": round(luma, 2),
             "dark_ratio": round(dark_ratio, 4),
             "center_yellow_pixels": yellow_pixels,
+            "center_yellow_ratio": round(yellow_ratio, 6),
             "quality_pixels": quality_pixels,
             "prompt_progress": prompt_progress,
             **button_features,

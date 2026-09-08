@@ -30,7 +30,7 @@ class DetectorConfig:
     gauge_min_color_pixels: int = 80
     quality_min_pixels: int = 180
     result_dark_luma: float = 112.0
-    result_yellow_pixels: int = 500
+    result_yellow_ratio: float = 0.010
     motion_threshold: int = 22
     motion_min_ratio: float = 0.04
 
