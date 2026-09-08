@@ -10,12 +10,15 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_build_contract_copies_operator_launchers_and_uses_the_frozen_name():
     script = (ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
     spec = (ROOT / "packaging" / "fishing_mvp.spec").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "src" / "fishing_mvp" / "__main__.py").read_text(encoding="utf-8")
 
     for launcher in ("portable\\START.bat", "portable\\STOP.bat", "portable\\使用說明.txt"):
         assert launcher in script
     assert "Copy-Item -LiteralPath $launcherPath" in script
     assert 'name="FishingMVP"' in spec
     assert 'PACKAGE_DEFAULT_FILE = SOURCE_ROOT / "fishing_mvp" / "defaults" / "default.yaml"' in spec
+    assert "if __package__" in entrypoint
+    assert "from fishing_mvp.cli import main" in entrypoint
     assert 'sys.exit(\'Python 3.10 or newer is required\')' in script
     assert 'sys.exit(\'Python 3.10 through 3.13 is required for PyInstaller 6.13.0\')' in script
     assert 'sys.exit(\'A 64-bit Python interpreter is required\')' in script
