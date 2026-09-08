@@ -11,7 +11,9 @@ scrcpy:
   frame_timeout_s: 3.0
 
 detector:
-  max_work_width: 760
+  # Downsampled processing keeps QTE cursor tracking responsive; coordinates
+  # are restored to the original framebuffer before any ADB input.
+  max_work_width: 480
   button_min_radius_ratio: 0.045
   button_max_radius_ratio: 0.22
   button_min_y_ratio: 0.57
@@ -23,6 +25,7 @@ detector:
   gauge_min_aspect: 2.4
   gauge_min_width_button_radius: 2.2
   gauge_min_color_pixels: 80
+  gauge_min_state_score: 0.72
   quality_min_pixels: 180
   result_dark_luma: 112
   result_yellow_ratio: 0.010
@@ -35,10 +38,30 @@ state_machine:
   result_min_hold_s: 2.0
 
 action:
-  tap_hold_ms: 80
+  # Zero uses Android input tap; a positive value uses a slower same-point swipe.
+  tap_hold_ms: 0
+  auto_start: false
   qte_enabled: false
   auto_continue: false
   min_confidence: 0.68
   min_action_interval_s: 0.45
   qte_min_interval_s: 0.18
   qte_target_margin: 0.05
+  # Predict marker position over the observed frame-to-input latency.
+  qte_input_latency_s: 0.18
+  qte_velocity_samples: 3
+  qte_min_velocity_norm_s: 0.12
+
+automation:
+  # Full-auto stops instead of waiting forever when a stage is not recognised.
+  unknown_timeout_s: 8.0
+  waiting_timeout_s: 30.0
+  # A round that returned to waiting without RESULT is not allowed to restart.
+  unconfirmed_waiting_timeout_s: 8.0
+  prompt_timeout_s: 12.0
+  casting_timeout_s: 12.0
+  qte_timeout_s: 35.0
+  quality_timeout_s: 10.0
+  result_timeout_s: 12.0
+  # Keep the foreground safety check without blocking every QTE tap.
+  foreground_check_interval_s: 0.75

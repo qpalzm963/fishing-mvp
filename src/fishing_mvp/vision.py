@@ -478,7 +478,32 @@ def detect_continue_button(frame: np.ndarray, result_visible: bool) -> Box | Non
         fill = cv2.contourArea(contour) / max(1.0, w * h)
         box = Box(roi.x + x, roi.y + y, w, h)
         candidates.append((float(np.clip(0.65 * fill + 0.35 * green_ratio, 0.0, 1.0)), box))
-    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+
+    # Some result variants use a small grey dismiss/continue X instead of a
+    # green bar.  Detect its high-contrast compact contour relative to the
+    # bottom-center of the current framebuffer; do not fall back to a fixed
+    # coordinate or an unconditional center tap.
+    icon_roi = _clip_box(width * 0.30, height * 0.92, width * 0.40, height * 0.075, width, height)
+    icon_crop = _crop(frame, icon_roi)
+    gray = cv2.cvtColor(icon_crop, cv2.COLOR_BGR2GRAY)
+    icon_mask = cv2.inRange(gray, 20, 130)
+    icon_mask = cv2.morphologyEx(icon_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    icon_mask = cv2.morphologyEx(icon_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    icon_candidates: list[tuple[float, Box]] = []
+    for contour in _contours(icon_mask):
+        x, y, w, h = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        if area < 80 or w <= 0 or h <= 0 or not 0.35 <= w / float(h) <= 2.8:
+            continue
+        box = Box(icon_roi.x + x, icon_roi.y + y, w, h)
+        if abs(box.cx - width / 2.0) > width * 0.12:
+            continue
+        fill = area / max(1.0, w * h)
+        center_score = 1.0 - min(1.0, abs(box.cx - width / 2.0) / max(1.0, width * 0.12))
+        icon_candidates.append((float(np.clip(0.65 * fill + 0.35 * center_score, 0.0, 1.0)), box))
+    return max(icon_candidates, key=lambda item: item[0])[1] if icon_candidates else None
 
 
 class FrameAnalyzer:
@@ -519,6 +544,8 @@ class FrameAnalyzer:
             # the later QTE bar and must not trigger QTE/quality states.
             work_gauge, gauge_score, marker_x, target_range = None, 0.0, None, None
         work_quality, quality_score, quality_pixels = detect_quality(work, work_button, work_gauge, self.config)
+        gauge_state_visible = work_gauge is not None and gauge_score >= self.config.gauge_min_state_score
+        quality_state_visible = work_quality is not None and gauge_state_visible
 
         button = _restore_box(work_button, scale, width, height)
         prompt = _restore_box(work_prompt, scale, width, height)
@@ -554,10 +581,10 @@ class FrameAnalyzer:
         if result_visible:
             hint = FishingState.RESULT
             confidence = result_score
-        elif work_quality is not None:
+        elif quality_state_visible:
             hint = FishingState.QUALITY
             confidence = quality_score
-        elif gauge is not None:
+        elif gauge_state_visible:
             hint = FishingState.QTE
             confidence = gauge_score
         elif prompt is not None:

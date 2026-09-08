@@ -13,7 +13,7 @@ from .capture import LiveFrameSource, create_live_frame_source, scrcpy_status
 from .config import AppConfig
 from .debug import draw_overlay, save_snapshot
 from .models import Action
-from .state_machine import ActionPlanner, FishingStateMachine
+from .state_machine import ActionPlanner, AutomationProgress, FishingStateMachine
 from .vision import FrameAnalyzer
 
 
@@ -57,12 +57,19 @@ def run_live(
     auto_continue: bool = False,
     max_seconds: float | None = None,
     capture_mode: str = "auto",
+    full_auto: bool = False,
+    max_rounds: int | None = None,
 ) -> dict[str, Any]:
     output_dir = Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "snapshots").mkdir(parents=True, exist_ok=True)
-    config.action.qte_enabled = qte_enabled
-    config.action.auto_continue = auto_continue
+    if max_rounds is not None and max_rounds < 1:
+        raise ValueError("max_rounds must be at least 1")
+    effective_qte = bool(qte_enabled or full_auto)
+    effective_continue = bool(auto_continue or full_auto)
+    config.action.auto_start = bool(full_auto)
+    config.action.qte_enabled = effective_qte
+    config.action.auto_continue = effective_continue
     controller = ADBController(serial)
     controller.assert_connected()
     if package is not None:
@@ -83,8 +90,11 @@ def run_live(
     analyzer = FrameAnalyzer(config.detector)
     machine = FishingStateMachine(config.state_machine)
     planner = ActionPlanner(config.action)
+    target_rounds = (max_rounds or 1) if full_auto else None
+    automation = AutomationProgress(max_rounds=target_rounds or 1) if full_auto else None
     start = time.monotonic()
     next_frame = start
+    foreground_checked_at = start
     first_size: tuple[int, int] | None = None
     frame_index = 0
     transitions: list[dict[str, Any]] = []
@@ -92,17 +102,27 @@ def run_live(
     state_counts: dict[str, int] = {}
     log_path = output_dir / "live_detections.jsonl"
     device_size = None
+    stop_reason: str | None = None
     if fallback_note:
         print(f"capture: {fallback_note}")
     try:
         device_size = controller.display_size()
         with log_path.open("w", encoding="utf-8") as log:
             try:
-                while max_seconds is None or time.monotonic() - start <= max_seconds:
+                while True:
+                    if max_seconds is not None and time.monotonic() - start > max_seconds:
+                        stop_reason = "max_seconds"
+                        break
                     now = time.monotonic()
                     if now < next_frame:
                         time.sleep(min(0.02, next_frame - now))
                         continue
+                    if package is not None:
+                        check_interval = max(0.0, config.automation.foreground_check_interval_s)
+                        if time.monotonic() - foreground_checked_at >= check_interval:
+                            if controller.foreground_package() != package:
+                                raise RuntimeError("Foreground package changed; stopping before sending action")
+                            foreground_checked_at = time.monotonic()
                     frame = source.read()
                     if first_size is None:
                         first_size = (frame.shape[1], frame.shape[0])
@@ -111,9 +131,22 @@ def run_live(
                     timestamp_s = time.monotonic() - start
                     detection = analyzer.analyze(frame, frame_index, timestamp_s)
                     state, transition = machine.update(detection)
-                    action = planner.plan(detection, state, transition)
+                    if automation is not None:
+                        automation.observe(state, timestamp_s, transition)
+                        if automation.timed_out(timestamp_s, config.automation):
+                            automation.stop_reason = f"state_timeout:{state.value}"
+                    action = None if automation is not None and automation.stop_reason is not None else planner.plan(
+                        detection,
+                        state,
+                        transition,
+                        start_allowed=automation.start_allowed if automation is not None else True,
+                    )
                     state_counts[state.value] = state_counts.get(state.value, 0) + 1
-                    record: dict[str, Any] = {"state": state.value, "detection": detection.to_dict(), "action": action.to_dict() if action else None}
+                    record: dict[str, Any] = {
+                        "state": state.value,
+                        "detection": detection.to_dict(),
+                        "action": action.to_dict() if action else None,
+                    }
                     if transition is not None:
                         transition_dict = transition.to_dict()
                         transitions.append(transition_dict)
@@ -127,27 +160,35 @@ def run_live(
                             (frame.shape[1], frame.shape[0]),
                             device_size or (frame.shape[1], frame.shape[0]),
                         )
+                        action_execution_ms: float | None = None
                         if send_actions:
-                            if package is not None and controller.foreground_package() != package:
-                                raise RuntimeError("Foreground package changed; stopping before sending action")
+                            execution_started = time.monotonic()
                             controller.execute(sent_action)
+                            action_execution_ms = (time.monotonic() - execution_started) * 1000.0
                             record["action_sent"] = True
                             record["sent_action"] = sent_action.to_dict()
+                            record["action_execution_ms"] = round(action_execution_ms, 2)
                         else:
                             record["action_sent"] = False
-                        actions.append({
+                        action_record = {
                             "timestamp_s": timestamp_s,
                             **action.to_dict(),
                             "sent": send_actions,
                             "sent_action": sent_action.to_dict() if send_actions else None,
-                        })
+                        }
+                        if action_execution_ms is not None:
+                            action_record["execution_ms"] = round(action_execution_ms, 2)
+                        actions.append(action_record)
                     log.write(json.dumps(record, ensure_ascii=False) + "\n")
                     log.flush()
                     print(f"t={timestamp_s:7.2f}s state={state.value:8s} conf={detection.confidence:.2f} action={'sent' if send_actions and action else 'proposal' if action else '-'}")
                     frame_index += 1
+                    if automation is not None and automation.stop_reason is not None:
+                        stop_reason = automation.stop_reason
+                        break
                     next_frame = max(next_frame + 1.0 / max(0.5, config.capture_fps), time.monotonic())
             except KeyboardInterrupt:
-                pass
+                stop_reason = "keyboard_interrupt"
     finally:
         source.close()
     summary = {
@@ -156,8 +197,13 @@ def run_live(
         "capture_mode_requested": capture_mode,
         "capture": source.info(),
         "send_actions": send_actions,
-        "qte_enabled": qte_enabled,
-        "auto_continue": auto_continue,
+        "full_auto": full_auto,
+        "max_rounds": target_rounds,
+        "completed_rounds": automation.completed_rounds if automation is not None else 0,
+        "stop_reason": stop_reason or (automation.stop_reason if automation is not None else None),
+        "auto_start": full_auto,
+        "qte_enabled": effective_qte,
+        "auto_continue": effective_continue,
         "frame_count": frame_index,
         "state_counts": state_counts,
         "transitions": transitions,
@@ -166,6 +212,9 @@ def run_live(
         "log": str(log_path),
         "notes": [
             "Live runner stops on ADB errors, foreground changes, or screen-size changes.",
+            "Foreground package checks are periodic so they do not block every QTE input.",
+            "Full-auto remains dry-run unless --live is explicitly supplied.",
+            "Full-auto stops after the configured number of RESULT-seen then WAITING round completions or a stage timeout.",
             *([fallback_note] if fallback_note else []),
         ],
     }

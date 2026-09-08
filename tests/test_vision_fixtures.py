@@ -78,6 +78,16 @@ def test_continue_detector_accepts_a_wide_green_control():
     assert box.w > box.h * 2
 
 
+def test_continue_detector_accepts_a_centered_gray_dismiss_icon():
+    frame = np.zeros((1170, 540, 3), dtype=np.uint8)
+    cv2.line(frame, (250, 1100), (290, 1140), (70, 70, 70), 8)
+    cv2.line(frame, (290, 1100), (250, 1140), (70, 70, 70), 8)
+    box = detect_continue_button(frame, result_visible=True)
+    assert box is not None
+    assert abs(box.cx / frame.shape[1] - 0.5) < 0.1
+    assert box.y / frame.shape[0] > 0.9
+
+
 def test_purple_mask_uses_detector_hsv_configuration():
     hsv_pixel = np.uint8([[[140, 220, 220]]])
     bgr_pixel = cv2.cvtColor(hsv_pixel, cv2.COLOR_HSV2BGR)[0, 0].tolist()

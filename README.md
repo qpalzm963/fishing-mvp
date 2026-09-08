@@ -68,7 +68,7 @@ python -m fishing_mvp debug \
 18.46s prompt -> 18.63s qte <-> quality -> 23.66s result -> 26.31s waiting
 ```
 
-兩次 prompt 都從偵測到的 action button 中心產生 tap proposal；離線分析預設不產生 QTE 點擊，QTE 執行需在 live 模式明確加上 `--enable-qte`。
+兩次 prompt 都從偵測到的 action button 中心產生 tap proposal；離線分析預設不產生 QTE 點擊，QTE 執行需在 live 模式明確加上 `--enable-qte`，或使用下方的 `--full-auto`。QTE live 模式會用最近數幀的 marker 位移估算速度，預測輸入延遲後的位置並提前點擊；沒有穩定速度時才退回當前影格的即時判斷。
 
 ## Live / scrcpy / ADB
 
@@ -101,15 +101,51 @@ python -m fishing_mvp live \
   --output-dir outputs/live
 ```
 
+### 完整自動化
+
+完整自動化會依序處理：
+
+`waiting/start` → `prompt` → `casting` → `qte` → `quality` → `result/結算` → `waiting`
+
+它會從畫面中找出等待／開始控制、QTE action control，以及結果畫面的動態繼續控制；不使用固定點擊座標。結果畫面沒有可辨識的主要繼續控制時，程式會等待狀態自然回到 `waiting`；看過 `RESULT` 並穩定回到 `waiting` 才算一輪完成。
+
+先以 dry-run 預覽完整流程（只記錄 proposal，不會點手機）：
+
+```bash
+python -m fishing_mvp live \
+  --serial YOUR_SERIAL \
+  --package YOUR.GAME.PACKAGE \
+  --capture auto \
+  --full-auto \
+  --max-rounds 1 \
+  --output-dir outputs/live_full_auto_preview
+```
+
+確認除錯輸出後，實機執行必須同時提供 `--live --full-auto`：
+
+```bash
+python -m fishing_mvp live \
+  --serial YOUR_SERIAL \
+  --package YOUR.GAME.PACKAGE \
+  --capture auto \
+  --live --full-auto \
+  --max-rounds 1 \
+  --output-dir outputs/live_full_auto
+```
+
+`--full-auto` 會自動開啟開始、QTE 與結果流程；`--max-rounds N` 預設為 1，完成 N 次「看過 `RESULT` 後回到 `WAITING`」後停止。若未加 `--live`，即使使用 `--full-auto` 也只會產生動作提案。當狀態長時間無法辨識或某個階段超時，程式會安全停止並在 `live_summary.json` 記錄 `stop_reason`，不會盲點。
+
 安全條件：
 
 - 使用者必須提供明確 `--serial`；程式不會選擇其他裝置。
-- `--package` 若提供，前景 package 不一致時會在輸入前停止。
+- `--package` 若提供，前景 package 會週期性檢查；不一致時會在下一次輸入前停止。週期檢查避免每一次 QTE tap 都被 `dumpsys` 阻塞。
 - ADB 斷線、解析度／方向改變、偵測信心不足或狀態未知時停止或不動作。
 - 程式不會自動啟動、切換、重啟或 force-stop App。
-- `--enable-qte` 採單擊事件模型，點擊間隔與按壓時間可在 YAML 調整。
+- `--enable-qte` 採即時單擊事件模型；QTE 速度預測、輸入延遲、點擊間隔與按壓時間可在 YAML 調整。
+- `--full-auto` 只會操作已在前景且符合 `--package` 的遊戲；它不會替使用者切換 App。
+- 完整自動化的各階段 timeout 在 `config/default.yaml` 的 `automation` 區段設定；超時會停止，不會改用固定座標猜測。
 
-預設 detector 取樣率是 10 FPS（目標每 100 ms 判斷一次）；QTE 事件冷卻預設 0.18 秒，實際頻率仍會受單幀 OpenCV 計算時間限制。
+預設 detector 取樣率是 10 FPS（目標每 100 ms 判斷一次），工作影像寬度預設為 480；座標會還原到原始 framebuffer。QTE 事件冷卻預設 0.18 秒，輸入延遲預估預設 0.18 秒，並以 `input tap`（0ms hold）降低 Android 端落後；實際頻率仍會受單幀 OpenCV 計算時間限制。
 
 scrcpy 是可選的外部擷取來源：`probe` 會顯示是否可用；使用 `--capture adb` 時不要求 scrcpy 已安裝。
 

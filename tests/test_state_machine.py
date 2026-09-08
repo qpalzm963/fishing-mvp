@@ -1,6 +1,6 @@
-from fishing_mvp.config import ActionConfig, StateMachineConfig
+from fishing_mvp.config import ActionConfig, AutomationConfig, StateMachineConfig
 from fishing_mvp.models import Box, Detection, FishingState, StateTransition
-from fishing_mvp.state_machine import ActionPlanner, FishingStateMachine
+from fishing_mvp.state_machine import ActionPlanner, AutomationProgress, FishingStateMachine
 
 
 def make_detection(index: int, hint: FishingState, confidence: float = 0.9) -> Detection:
@@ -67,6 +67,38 @@ def test_prompt_action_retries_until_a_confident_frame_then_handles_session():
     assert planner.plan(make_detection(7, FishingState.PROMPT, confidence=0.90), state, transition) is not None
 
 
+def test_full_auto_starts_from_an_inactive_waiting_control_once_per_entry():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
+    planner = ActionPlanner(ActionConfig(min_confidence=0.5, auto_start=True, min_action_interval_s=0.45))
+
+    waiting = make_detection(0, FishingState.WAITING)
+    waiting.action_active = True  # Some devices render the waiting control as saturated green.
+    state, transition = machine.update(waiting)
+    action = planner.plan(waiting, state, transition)
+    assert action is not None
+    assert action.reason == "stable dynamically detected waiting/start control"
+    assert (action.x, action.y) == (500, 1650)
+
+    same_waiting = make_detection(1, FishingState.WAITING)
+    same_waiting.action_active = True
+    state, transition = machine.update(same_waiting)
+    assert planner.plan(same_waiting, state, transition) is None
+
+    prompt = make_detection(2, FishingState.PROMPT)
+    state, transition = machine.update(prompt)
+    assert planner.plan(prompt, state, transition) is None
+    later_waiting = make_detection(6, FishingState.WAITING)
+    later_waiting.action_active = True
+    state, transition = machine.update(later_waiting)
+    assert planner.plan(later_waiting, state, transition) is not None
+
+
+def test_full_auto_does_not_start_again_after_a_round_without_result():
+    planner = ActionPlanner(ActionConfig(min_confidence=0.5, auto_start=True))
+    detection = make_detection(0, FishingState.WAITING)
+    assert planner.plan(detection, FishingState.WAITING, start_allowed=False) is None
+
+
 def test_qte_actions_are_opt_in():
     machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
     disabled = ActionPlanner(ActionConfig(min_confidence=0.5, qte_enabled=False))
@@ -75,6 +107,43 @@ def test_qte_actions_are_opt_in():
     enabled = ActionPlanner(ActionConfig(min_confidence=0.5, qte_enabled=True, qte_min_interval_s=0.1))
     action = enabled.plan(make_detection(0, FishingState.QTE), state, transition)
     assert action is not None and action.action_type.value == "tap"
+
+
+def test_qte_prediction_triggers_before_marker_enters_target():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
+    planner = ActionPlanner(
+        ActionConfig(
+            min_confidence=0.5,
+            qte_enabled=True,
+            qte_min_interval_s=0.1,
+            qte_target_margin=0.0,
+            qte_input_latency_s=0.2,
+            qte_velocity_samples=2,
+            qte_min_velocity_norm_s=0.1,
+        )
+    )
+
+    def qte(index: int, timestamp: float, marker: float) -> Detection:
+        detection = make_detection(index, FishingState.QTE)
+        detection.timestamp_s = timestamp
+        detection.gauge_marker_x = marker
+        detection.gauge_target_range = (0.30, 0.51)
+        return detection
+
+    first = qte(0, 0.0, 0.86)
+    state, transition = machine.update(first)
+    assert planner.plan(first, state, transition) is None
+
+    second = qte(1, 0.1, 0.80)
+    state, transition = machine.update(second)
+    assert planner.plan(second, state, transition) is None
+
+    third = qte(2, 0.2, 0.68)
+    state, transition = machine.update(third)
+    action = planner.plan(third, state, transition)
+    assert action is not None
+    assert "predicted marker" in action.reason
+    assert "now=0.680" in action.reason
 
 
 def test_qte_action_triggers_once_per_target_entry():
@@ -94,6 +163,62 @@ def test_qte_action_triggers_once_per_target_entry():
 
     state, transition = machine.update(make_detection(3, FishingState.QTE))
     assert planner.plan(make_detection(3, FishingState.QTE), state, transition) is not None
+
+
+def test_result_continue_action_is_once_per_result_entry():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
+    planner = ActionPlanner(ActionConfig(min_confidence=0.5, auto_continue=True))
+    result = make_detection(0, FishingState.RESULT)
+    result.continue_box = Box(100, 1500, 800, 100)
+    state, transition = machine.update(result)
+    assert planner.plan(result, state, transition) is not None
+
+    same_result = make_detection(1, FishingState.RESULT)
+    same_result.continue_box = result.continue_box
+    state, transition = machine.update(same_result)
+    assert planner.plan(same_result, state, transition) is None
+
+
+def test_automation_progress_counts_only_result_to_waiting_as_a_completed_round():
+    progress = AutomationProgress(max_rounds=1)
+    progress.observe(FishingState.WAITING, 0.0)
+    progress.observe(FishingState.RESULT, 3.0)
+    assert progress.completed_rounds == 0
+
+    transition = StateTransition(
+        timestamp_s=5.0,
+        frame_index=50,
+        from_state=FishingState.RESULT,
+        to_state=FishingState.WAITING,
+        confidence=0.9,
+        reason="result complete",
+    )
+    assert progress.observe(FishingState.WAITING, 5.0, transition) == "completed_rounds"
+    assert progress.completed_rounds == 1
+
+
+def test_automation_progress_accepts_a_short_animation_between_result_and_waiting():
+    progress = AutomationProgress(max_rounds=1)
+    progress.observe(FishingState.RESULT, 1.0)
+    progress.observe(FishingState.CASTING, 2.0)
+    assert progress.observe(FishingState.WAITING, 3.0) == "completed_rounds"
+    assert progress.completed_rounds == 1
+
+
+def test_automation_progress_blocks_restart_when_an_active_round_returns_to_waiting():
+    progress = AutomationProgress(max_rounds=1)
+    progress.observe(FishingState.PROMPT, 1.0)
+    progress.observe(FishingState.WAITING, 2.0)
+    assert not progress.start_allowed
+    assert progress.completed_rounds == 0
+    assert progress.timed_out(10.0, AutomationConfig(unconfirmed_waiting_timeout_s=8.0))
+
+
+def test_automation_progress_has_a_qte_timeout():
+    progress = AutomationProgress(max_rounds=1)
+    progress.observe(FishingState.QTE, 2.0)
+    assert not progress.timed_out(4.9, AutomationConfig(qte_timeout_s=3.0))
+    assert progress.timed_out(5.0, AutomationConfig(qte_timeout_s=3.0))
 
 
 def test_qte_context_does_not_flicker_to_casting_on_motion_gap():

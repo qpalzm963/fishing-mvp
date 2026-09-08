@@ -29,6 +29,7 @@ def _add_video_args(parser: argparse.ArgumentParser, default_output: str) -> Non
     parser.add_argument("--analysis-fps", type=float, default=None, help="Detector sampling rate; video output keeps source FPS")
     parser.add_argument("--max-seconds", type=float, default=None)
     parser.add_argument("--no-video", action="store_true", help="Skip annotated MP4 generation")
+    parser.add_argument("--full-auto", action="store_true", help="Preview start, QTE, and result actions offline")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--output-dir", default="outputs/live")
     live.add_argument("--max-seconds", type=float, default=None)
     live.add_argument("--live", action="store_true", help="Actually send ADB input; omit for dry-run")
+    live.add_argument("--full-auto", action="store_true", help="Enable dynamic start -> QTE -> result automation")
+    live.add_argument("--max-rounds", type=int, default=None, help="Full-auto rounds before stopping (default: 1)")
     live.add_argument("--enable-qte", action="store_true", help="Allow QTE tap proposals to be sent")
     live.add_argument("--auto-continue", action="store_true", help="Allow a detected result continue button to be tapped")
 
@@ -63,6 +66,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command in {"analyze-video", "debug"}:
             config = _config(args.config)
+            if args.full_auto:
+                config.action.auto_start = True
+                config.action.qte_enabled = True
+                config.action.auto_continue = True
             summary = analyze_video(
                 args.input,
                 args.output_dir,
@@ -87,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
                 qte_enabled=args.enable_qte,
                 auto_continue=args.auto_continue,
                 max_seconds=args.max_seconds,
+                full_auto=args.full_auto,
+                max_rounds=args.max_rounds,
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
