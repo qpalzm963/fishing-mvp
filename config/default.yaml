@@ -1,0 +1,36 @@
+# All geometry is expressed as ratios or relationships to detected UI anchors.
+# These values tune detector confidence; they are not click coordinates.
+capture_fps: 10
+
+detector:
+  max_work_width: 760
+  button_min_radius_ratio: 0.045
+  button_max_radius_ratio: 0.22
+  button_min_y_ratio: 0.57
+  button_max_y_ratio: 0.91
+  button_active_purple_ratio: 0.08
+  prompt_min_fill_ratio: 0.10
+  prompt_min_aspect: 2.0
+  prompt_max_aspect: 12.0
+  gauge_min_aspect: 2.4
+  gauge_min_width_button_radius: 2.2
+  gauge_min_color_pixels: 80
+  quality_min_pixels: 180
+  result_dark_luma: 112
+  result_yellow_pixels: 500
+  motion_threshold: 22
+  motion_min_ratio: 0.04
+
+state_machine:
+  stable_frames: 2
+  unknown_grace_frames: 8
+  result_min_hold_s: 2.0
+
+action:
+  tap_hold_ms: 80
+  qte_enabled: false
+  auto_continue: false
+  min_confidence: 0.68
+  min_action_interval_s: 0.45
+  qte_min_interval_s: 0.18
+  qte_target_margin: 0.05
