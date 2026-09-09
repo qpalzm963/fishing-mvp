@@ -906,6 +906,13 @@ class FrameAnalyzer:
                 self.target_tracking_mode = "hold_expansion"
                 return previous
             envelope = self._target_envelope(self.target_range_history) or current
+            if envelope[1] - envelope[0] > allowed_width + 1e-6:
+                # Never let repeated wide observations enlarge the safe click
+                # range beyond the configured bound after a shrink.
+                self.target_range_history.clear()
+                self.target_range_history.append(previous)
+                self.target_tracking_mode = "hold_expansion_over_width"
+                return previous
             self.tracked_target_range = envelope
             self.target_tracking_mode = "recovered_expansion"
             return envelope

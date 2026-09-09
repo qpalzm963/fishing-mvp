@@ -81,7 +81,6 @@ class ActionConfig:
     qte_latency_sample_window: int = 5
     qte_velocity_samples: int = 3
     qte_min_velocity_norm_s: float = 0.12
-    qte_velocity_max_jitter_norm_s: float = 0.8
     # If a predictive tap lands before the marker is visually observed in the
     # target, re-arm after this grace window so a later sweep can be retried.
     qte_prediction_grace_s: float = 0.24

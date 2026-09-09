@@ -165,3 +165,25 @@ def test_replay_sequence_shrinks_without_stale_widening_and_recovers_occlusion()
     assert tracked[2] == (0.64, 0.68)
     assert tracked[3] == tracked[2]
     assert tracked[4] == (0.645, 0.675)
+
+
+def test_over_wide_overlapping_expansion_stays_bounded():
+    analyzer = FrameAnalyzer(
+        DetectorConfig(
+            gauge_target_tracking_frames=2,
+            gauge_target_tracking_max_width_ratio=0.18,
+            gauge_target_tracking_max_gap_ratio=0.06,
+        )
+    )
+    gauge = Box(100, 500, 300, 40)
+    narrow = (0.46, 0.54)
+    over_wide = (0.36, 0.64)
+
+    assert analyzer._stabilize_target_range(gauge, narrow, 0.04) == narrow
+
+    for _ in range(5):
+        assert analyzer._stabilize_target_range(gauge, over_wide, 0.04) == narrow
+        assert analyzer.tracked_target_range == narrow
+        assert list(analyzer.target_range_history) == [narrow]
+
+    assert analyzer.target_tracking_mode == "hold_expansion_over_width"
