@@ -88,7 +88,20 @@ python -m fishing_mvp debug \
 18.46s prompt -> 18.63s qte <-> quality -> 23.66s result -> 26.31s waiting
 ```
 
-兩次 prompt 都從偵測到的 action button 中心產生 tap proposal；離線分析預設不產生 QTE 點擊，QTE 執行需在 live 模式明確加上 `--enable-qte`，或使用下方的 `--full-auto`。QTE live 模式會用最近數幀的 marker 位移估算速度，預測輸入延遲後的位置並提前點擊；沒有穩定速度時才退回當前影格的即時判斷。目標色帶改以黃色像素的相對 span、像素數與連續欄位覆蓋率動態判定，因此較窄的 QTE 目標也能辨識；紅色 marker 中心使用中位數，寬度使用分位數 span 並套用合理上限，點擊判斷同時納入 marker 中心與 marker 寬度。若 marker 暫時遮住窄目標，偵測器會在同一個相對 gauge 內以最多 4 幀、最多 18% 寬度的短 envelope 合併鄰近黃色片段，並容許最多 4 個缺失影格；gauge 改變或跳躍過大時會清除追蹤，避免沿用上一個 QTE。
+兩次 prompt 都從偵測到的 action button 中心產生 tap proposal；離線分析預設不產生 QTE 點擊，QTE 執行需在 live 模式明確加上 `--enable-qte`，或使用下方的 `--full-auto`。QTE live 模式會用最近數幀的 marker 位移估算速度，並以輸入落地時間做 ETA 判定；速度為零或抖動過大時，才退回既有的 predicted-position／當前 in-range 判定。
+
+Issue #5 的窄目標流程分成三層：`gauge_raw_target_range` 是原始觀測、`gauge_tracked_target_range` 是時序追蹤、`gauge_safe_click_range` 是 planner 使用的範圍；舊的 `gauge_target_range` 保留為 safe range alias。Gauge 仍在最大 480px 的 work frame 定位，定位後把 box 映射回原始影像，只在 padded gauge ROI 以原始解析度 refine 紅色 marker 與黃色 target，兩個欄位各自失敗時回退到 work-frame 結果，不做全畫面 full-res 搜尋。
+
+Tracker 對 target 收縮採立即收斂，單一較寬觀測不會重新放大 safe range；放大需要受限的連續證據，marker 遮蔽／短暫缺失最多沿用 4 幀，gauge 跳變或缺失過久會 reset。ETA 使用 `target_center`、marker velocity，以及 `frame_age + analysis_duration + dispatch_latency + tap_hold`；timing window 隨 target 寬度縮放，並支援 `[0, 1]` 邊界反彈預測。`detections.jsonl` 的 `features.gauge_refine`、`features.qte` 會記錄 raw／tracked／safe range、marker、velocity、ETA、input ETA、timing window、boundary mode、reflection 與 tap reason。
+
+使用提供的影片驗證 Issue #5：
+
+```bash
+python -m fishing_mvp analyze-video \
+  --input /Users/vince.huang/Downloads/1000018497.mp4 \
+  --output-dir outputs/issue5_video_validation \
+  --analysis-fps 30 --full-auto --no-video
+```
 
 ## Live / scrcpy / ADB
 
@@ -163,12 +176,12 @@ python -m fishing_mvp live \
 - `--package` 若提供，前景 package 會週期性檢查；不一致時會在下一次輸入前停止。週期檢查避免每一次 QTE tap 都被 `dumpsys` 阻塞。
 - ADB 斷線、解析度／方向改變、偵測信心不足或狀態未知時停止或不動作。
 - 程式不會自動啟動、切換、重啟或 force-stop App。
-- `--enable-qte` 採即時單擊事件模型；QTE 速度預測、輸入延遲、點擊間隔與按壓時間可在 YAML 調整。窄目標的 `gauge_target_min_color_pixels`、`gauge_target_min_width_ratio`、`gauge_target_min_width_px` 與 `gauge_target_min_column_coverage` 控制偵測下限；`gauge_marker_max_width_ratio` 避免背景紅色元素被當成 marker 寬度；`gauge_target_tracking_frames`、`gauge_target_tracking_max_width_ratio`、`gauge_target_tracking_max_gap_ratio` 與 `gauge_target_tracking_missing_frames` 控制窄目標的短暫連續追蹤；預測點擊未觀察到實際入框時，會在 `qte_prediction_grace_s` 後重新武裝，保留後續掃掠的補救機會。
+- `--enable-qte` 採即時單擊事件模型；QTE 速度預測、ETA、輸入延遲、點擊間隔與按壓時間可在 YAML 調整。窄目標的 `gauge_target_min_color_pixels`、`gauge_target_min_width_ratio`、`gauge_target_min_width_px` 與 `gauge_target_min_column_coverage` 控制偵測下限；`gauge_marker_max_width_ratio` 避免背景紅色元素被當成 marker 寬度；`gauge_full_res_refine_enabled` 與 `gauge_full_res_refine_padding_ratio` 控制原始解析度 ROI refine；`gauge_target_tracking_frames`、`gauge_target_tracking_max_width_ratio`、`gauge_target_tracking_max_gap_ratio` 與 `gauge_target_tracking_missing_frames` 控制收縮／放大證據與短暫遮蔽 recovery。`qte_eta_enabled` 預設開啟，`qte_boundary_mode` 可選 `auto`、`reflection` 或 `clip`；預測點擊未觀察到實際入框時，會在 `qte_prediction_grace_s` 後重新武裝，保留後續掃掠的補救機會。
 - `result_extra_tap_enabled`、`result_extra_tap_delay_s` 與 `result_max_attempts` 控制結算控制的有限重試；每次位置都由當前畫面的控制或結果輪廓動態產生，且不使用固定座標。
 - `--full-auto` 只會操作已在前景且符合 `--package` 的遊戲；它不會替使用者切換 App。
 - 完整自動化的各階段 timeout 在 `config/default.yaml` 的 `automation` 區段設定；超時會停止，不會改用固定座標猜測。
 
-預設 detector 在等待／提示／結算階段取樣 10 FPS，在 QTE／QUALITY 階段動態提升到 30 FPS；可用 `--fps` 與 `--qte-fps` 或 YAML 的 `capture_fps`／`qte_capture_fps` 調整。工作影像寬度預設為 480；座標會還原到原始 framebuffer。QTE 事件冷卻預設 0.18 秒，輸入延遲會以來源分開記錄並使用移動中位數；尚未有實測樣本時才使用 `qte_input_latency_s` 初始值。預設以 `input tap`（0ms hold）降低 Android 端落後。
+預設 detector 在等待／提示／結算階段取樣 10 FPS，在 QTE／QUALITY 階段動態提升到 30 FPS；可用 `--fps` 與 `--qte-fps` 或 YAML 的 `capture_fps`／`qte_capture_fps` 調整。Gauge 工作影像寬度預設為 480，marker／target 只在映射後的原始 gauge ROI refine；輸出的 normalized 座標仍會還原到原始 framebuffer。QTE 事件冷卻預設 0.18 秒，ETA horizon 會加總 frame age、CV 分析、來源分開的 dispatch latency 與 tap hold；尚未有實測樣本時才使用 `qte_input_latency_s` 初始值。預設以 `input tap`（0ms hold）降低 Android 端落後。
 
 scrcpy 是可選的外部擷取來源：`probe` 會顯示是否可用；使用 `--capture adb` 時不要求 scrcpy 已安裝。
 
@@ -203,7 +216,7 @@ python -m fishing_mvp analyze-video \
 python -m pytest
 ```
 
-測試涵蓋 HSV mask、normalized geometry、狀態機穩定幀／unknown grace、action cooldown、QTE 目標區去重、scrcpy packet metadata 與安全模式。影片驗證是以可重現的狀態時間線與 annotated output 為主，並不把未標註影片宣稱為正式 precision／recall benchmark。
+測試涵蓋 HSV mask、normalized geometry、狀態機穩定幀／unknown grace、action cooldown、QTE 目標區去重、shrink-aware replay、full-resolution ROI、ETA 左右向掃掠、零／抖動速度 fallback、邊界反彈、scrcpy packet metadata 與安全模式。影片驗證是以可重現的狀態時間線與 annotated output 為主，並不把未標註影片宣稱為正式 precision／recall benchmark。
 
 `tests/fixtures/` 包含從測試影片抽出的少量 waiting、prompt、QTE、quality、result 影格，直接回歸 action button、prompt、gauge、marker、quality、result 與 continue 偵測；完整影片不需要放進 repository。GitHub Actions 會在 Python 3.10 與 3.12 執行安裝、pytest 與 compileall。
 

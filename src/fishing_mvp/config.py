@@ -48,6 +48,11 @@ class DetectorConfig:
     result_yellow_ratio: float = 0.010
     motion_threshold: int = 22
     motion_min_ratio: float = 0.04
+    # Locate the gauge on the work frame, then refine marker/target colour
+    # spans inside the mapped original-resolution ROI.  Appended to preserve
+    # positional compatibility with the original detector config.
+    gauge_full_res_refine_enabled: bool = True
+    gauge_full_res_refine_padding_ratio: float = 0.12
 
 
 @dataclass
@@ -84,6 +89,13 @@ class ActionConfig:
     result_extra_tap_enabled: bool = True
     result_extra_tap_delay_s: float = 1.0
     result_max_attempts: int = 3
+    # Appended after the original action fields for positional compatibility.
+    # ETA uses the existing predicted-position check as its fallback.
+    qte_eta_enabled: bool = True
+    # auto reflects only when a predicted path crosses [0, 1]; clip preserves
+    # the legacy non-bouncing behaviour for games that do not reflect.
+    qte_boundary_mode: str = "auto"
+    qte_velocity_max_jitter_norm_s: float = 0.8
 
 
 @dataclass
