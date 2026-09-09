@@ -33,6 +33,9 @@ detector:
   gauge_target_min_width_px: 6
   gauge_target_min_column_coverage: 0.45
   gauge_marker_max_width_ratio: 0.35
+  # Locate on the work frame, refine colour geometry in the original ROI.
+  gauge_full_res_refine_enabled: true
+  gauge_full_res_refine_padding_ratio: 0.12
   # Bridge short red-marker occlusions without allowing an unbounded target.
   gauge_target_tracking_frames: 4
   gauge_target_tracking_max_width_ratio: 0.18
@@ -60,11 +63,16 @@ action:
   min_action_interval_s: 0.45
   qte_min_interval_s: 0.18
   qte_target_margin: 0.05
+  # ETA timing is used when velocity is stable; predicted-position is fallback.
+  qte_eta_enabled: true
+  # auto reflects only when the predicted path crosses [0, 1]; clip disables it.
+  qte_boundary_mode: auto
   # Predict marker position over the observed frame-to-input latency.
   qte_input_latency_s: 0.18
   qte_latency_sample_window: 5
   qte_velocity_samples: 3
   qte_min_velocity_norm_s: 0.12
+  qte_velocity_max_jitter_norm_s: 0.8
   # Re-arm a predictive tap if visual entry is not observed within this time.
   qte_prediction_grace_s: 0.24
   # Re-detect the result control after each tap while the result overlay remains.

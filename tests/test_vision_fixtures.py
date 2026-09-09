@@ -11,6 +11,7 @@ from fishing_mvp.vision import (
     color_mask,
     detect_continue_button,
     detect_result_fallback_tap,
+    refine_gauge_roi,
 )
 
 
@@ -54,6 +55,41 @@ def test_qte_fixture_detects_gauge_marker_and_target_range():
     assert 0.0 <= detection.gauge_marker_x <= 1.0
     assert detection.gauge_marker_width is not None
     assert detection.features["gauge_target_width"] == round(high - low, 5)
+    refine = detection.features["gauge_refine"]
+    assert refine["attempted"] is True
+    assert refine["marker_source"] == "full_res_roi"
+    assert refine["target_source"] == "full_res_roi"
+    assert detection.gauge_raw_target_range == detection.gauge_tracked_target_range
+    assert detection.gauge_safe_click_range == detection.gauge_target_range
+
+
+def test_full_resolution_gauge_roi_refines_normalized_marker_and_target_without_full_frame_search():
+    config = DetectorConfig()
+    frame = np.zeros((220, 420, 3), dtype=np.uint8)
+    gauge = Box(90, 100, 240, 24)
+    yellow = cv2.cvtColor(np.uint8([[[28, 220, 240]]]), cv2.COLOR_HSV2BGR)[0, 0].tolist()
+    red = cv2.cvtColor(np.uint8([[[4, 230, 240]]]), cv2.COLOR_HSV2BGR)[0, 0].tolist()
+    frame[106:118, 150:182] = yellow
+    frame[104:120, 246:255] = red
+
+    refined = refine_gauge_roi(frame, gauge, config)
+
+    assert refined.target_range is not None
+    assert refined.marker_x is not None
+    assert refined.marker_width is not None
+    assert 0.23 < refined.target_range[0] < 0.30
+    assert 0.35 < refined.target_range[1] < 0.40
+    assert 0.63 < refined.marker_x < 0.72
+
+
+def test_gauge_refine_can_be_disabled_without_changing_work_frame_detection():
+    frame = load_fixture("qte")
+    detection = FrameAnalyzer(DetectorConfig(gauge_full_res_refine_enabled=False)).analyze(frame, 0, 0.0)
+
+    assert detection.gauge_box is not None
+    assert detection.features["gauge_refine"]["attempted"] is False
+    assert detection.features["gauge_refine"]["target_source"] == "work"
+    assert detection.gauge_raw_target_range is not None
 
 
 def test_narrow_yellow_target_is_accepted_but_sparse_noise_is_rejected():
@@ -71,7 +107,7 @@ def test_narrow_yellow_target_is_accepted_but_sparse_noise_is_rejected():
     assert _target_range_from_yellow(sparse, 120, config) is None
 
 
-def test_narrow_target_continuity_bridges_marker_occlusion_without_stale_carryover():
+def test_narrow_target_tracking_shrinks_immediately_and_recovers_boundedly():
     config = DetectorConfig(
         gauge_target_tracking_frames=4,
         gauge_target_tracking_max_width_ratio=0.18,
@@ -80,15 +116,34 @@ def test_narrow_target_continuity_bridges_marker_occlusion_without_stale_carryov
     analyzer = FrameAnalyzer(config)
     gauge = Box(100, 500, 300, 40)
 
-    assert analyzer._stabilize_target_range(gauge, (0.650, 0.719), 0.08) == (0.650, 0.719)
-    analyzer._stabilize_target_range(gauge, (0.688, 0.719), 0.08)
-    bridged = analyzer._stabilize_target_range(gauge, (0.623, 0.657), 0.08)
-    assert bridged is not None
-    assert bridged[0] == 0.623
-    assert bridged[1] == 0.719
+    assert analyzer._stabilize_target_range(gauge, (0.620, 0.800), 0.08) == (0.620, 0.800)
+    narrowed = analyzer._stabilize_target_range(gauge, (0.650, 0.700), 0.08)
+    assert narrowed == (0.650, 0.700)
+
+    recovered = analyzer._stabilize_target_range(gauge, None, 0.08, marker_x=0.675)
+    assert recovered == narrowed
+    assert analyzer.target_tracking_mode == "recovery_marker_occlusion"
+
+    # A single wider observation cannot restore the old wide click range.
+    held = analyzer._stabilize_target_range(gauge, (0.620, 0.800), 0.08)
+    assert held == narrowed
 
     reset = analyzer._stabilize_target_range(gauge, (0.120, 0.180), 0.08)
     assert reset == (0.120, 0.180)
+
+
+def test_narrow_target_tracking_resets_after_long_missing_or_gauge_jump():
+    analyzer = FrameAnalyzer(DetectorConfig(gauge_target_tracking_missing_frames=2))
+    gauge = Box(100, 500, 300, 40)
+    assert analyzer._stabilize_target_range(gauge, (0.45, 0.55), 0.04) == (0.45, 0.55)
+    assert analyzer._stabilize_target_range(gauge, None, 0.04) == (0.45, 0.55)
+    assert analyzer._stabilize_target_range(gauge, None, 0.04) == (0.45, 0.55)
+    assert analyzer._stabilize_target_range(gauge, None, 0.04) is None
+
+    assert analyzer._stabilize_target_range(gauge, (0.45, 0.55), 0.04) == (0.45, 0.55)
+    jumped_gauge = Box(500, 500, 300, 40)
+    assert analyzer._stabilize_target_range(jumped_gauge, (0.70, 0.80), 0.04) == (0.70, 0.80)
+    assert analyzer.target_tracking_mode == "raw_initial"
 
 
 def test_qte_fast_path_keeps_dynamic_button_and_gauge_detection():

@@ -37,6 +37,17 @@ class _GaugeCandidate:
     target_range: tuple[float, float] | None
 
 
+@dataclass(frozen=True)
+class _GaugeRefinement:
+    """Colour geometry refined inside an original-resolution gauge ROI."""
+
+    marker_x: float | None
+    marker_width: float | None
+    target_range: tuple[float, float] | None
+    marker_pixels: int
+    target_pixels: int
+
+
 def _contours(mask: np.ndarray) -> list[np.ndarray]:
     found = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return list(found[0] if len(found) == 2 else found[1])
@@ -525,6 +536,66 @@ def detect_gauge(
     return box, score, marker_x, marker_width, target_range
 
 
+def refine_gauge_roi(
+    frame: np.ndarray,
+    gauge: Box,
+    config: DetectorConfig,
+) -> _GaugeRefinement:
+    """Refine marker and target geometry from a padded full-resolution ROI.
+
+    Gauge localisation remains a work-frame operation.  This helper deliberately
+    receives the already mapped gauge box and never searches the full frame, so
+    high-resolution colour analysis is limited to the small region where the
+    moving QTE elements are expected.
+    """
+
+    height, width = frame.shape[:2]
+    if gauge.w <= 1 or gauge.h <= 0 or width <= 0 or height <= 0:
+        return _GaugeRefinement(None, None, None, 0, 0)
+    padding = max(0.0, float(config.gauge_full_res_refine_padding_ratio))
+    pad_x = max(1, int(round(gauge.w * padding)))
+    pad_y = max(1, int(round(gauge.h * padding)))
+    roi = _clip_box(
+        gauge.x - pad_x,
+        gauge.y - pad_y,
+        gauge.w + 2 * pad_x,
+        gauge.h + 2 * pad_y,
+        width,
+        height,
+    )
+    local_gauge = _clip_box(
+        gauge.x - roi.x,
+        gauge.y - roi.y,
+        gauge.w,
+        gauge.h,
+        roi.w,
+        roi.h,
+    )
+    crop = _crop(_crop(frame, roi), local_gauge)
+    if crop.size == 0 or local_gauge.w <= 1:
+        return _GaugeRefinement(None, None, None, 0, 0)
+
+    red = color_mask(crop, "red")
+    yellow = color_mask(crop, "yellow")
+    red_points = cv2.findNonZero(red)
+    marker_x: float | None = None
+    marker_width: float | None = None
+    marker_pixels = int(cv2.countNonZero(red))
+    if red_points is not None and len(red_points) >= 3:
+        red_coords = red_points.reshape(-1, 2)
+        marker_x = float(np.median(red_coords[:, 0]) / max(1, local_gauge.w - 1))
+        marker_x = float(np.clip(marker_x, 0.0, 1.0))
+        low_x, high_x = np.quantile(red_coords[:, 0], (0.05, 0.95))
+        marker_span_px = int(math.ceil(float(high_x)) - math.floor(float(low_x)) + 1)
+        candidate_width = marker_span_px / max(1, local_gauge.w)
+        if candidate_width <= max(0.0, config.gauge_marker_max_width_ratio):
+            marker_width = float(np.clip(candidate_width, 0.0, 1.0))
+
+    target_pixels = int(cv2.countNonZero(yellow))
+    target_range = _target_range_from_yellow(yellow, local_gauge.w, config)
+    return _GaugeRefinement(marker_x, marker_width, target_range, marker_pixels, target_pixels)
+
+
 def detect_quality(
     frame: np.ndarray,
     button: Box | None,
@@ -705,6 +776,9 @@ class FrameAnalyzer:
             maxlen=max(1, int(config.gauge_target_tracking_frames))
         )
         self.target_range_missing_frames = 0
+        self.tracked_target_range: tuple[float, float] | None = None
+        self.target_tracking_mode = "reset"
+        self.target_marker_occluded = False
 
     @staticmethod
     def _gauge_is_continuous(previous: Box | None, current: Box) -> bool:
@@ -731,63 +805,125 @@ class FrameAnalyzer:
         gauge: Box | None,
         target_range: tuple[float, float] | None,
         marker_width: float | None,
+        marker_x: float | None = None,
     ) -> tuple[float, float] | None:
-        """Bridge short target occlusions while bounding target expansion.
+        """Track a target with immediate contraction and guarded recovery.
 
-        The yellow target is sometimes partly hidden by the red marker.  A
-        short relative envelope recovers the union of nearby visible pieces;
-        a large jump, a changed gauge, or an over-wide envelope starts a new
-        target instead of carrying stale state across QTE steps.
+        A yellow span can become wider when the marker or a compression
+        artefact hides one of its edges.  The old tracker unioned every valid
+        frame, which made a stale wide envelope survive a real target shrink.
+        This tracker therefore accepts a narrower raw span immediately.  It
+        only expands after repeated compatible evidence, and a missing target
+        reuses the latest tracked span for a bounded number of frames.
         """
 
         if gauge is None:
             self.previous_gauge_work = None
             self.target_range_history.clear()
             self.target_range_missing_frames = 0
+            self.tracked_target_range = None
+            self.target_tracking_mode = "reset_no_gauge"
+            self.target_marker_occluded = False
             return None
 
         if not self._gauge_is_continuous(self.previous_gauge_work, gauge):
             self.target_range_history.clear()
             self.target_range_missing_frames = 0
+            self.tracked_target_range = None
+            self.target_tracking_mode = "reset_gauge_discontinuity"
         self.previous_gauge_work = gauge
 
         if target_range is None:
             self.target_range_missing_frames += 1
+            marker_occluded = False
+            if self.tracked_target_range is not None and marker_x is not None:
+                target_center = sum(self.tracked_target_range) / 2.0
+                target_half_width = (self.tracked_target_range[1] - self.tracked_target_range[0]) / 2.0
+                marker_half_width = max(0.0, float(marker_width or 0.0)) / 2.0
+                marker_occluded = abs(float(marker_x) - target_center) <= target_half_width + marker_half_width
+            self.target_marker_occluded = marker_occluded
             if (
-                self.target_range_history
+                self.tracked_target_range is not None
                 and self.target_range_missing_frames
                 <= max(0, int(self.config.gauge_target_tracking_missing_frames))
             ):
-                return self._target_envelope(self.target_range_history)
+                self.target_tracking_mode = "recovery_marker_occlusion" if marker_occluded else "recovery_missing"
+                return self.tracked_target_range
             self.target_range_history.clear()
+            self.tracked_target_range = None
+            self.target_tracking_mode = "reset_target_missing"
             return None
 
         self.target_range_missing_frames = 0
+        self.target_marker_occluded = False
         low, high = sorted((float(target_range[0]), float(target_range[1])))
         current = (float(np.clip(low, 0.0, 1.0)), float(np.clip(high, 0.0, 1.0)))
         if current[1] <= current[0]:
             self.target_range_history.clear()
+            self.tracked_target_range = None
+            self.target_tracking_mode = "reset_invalid_target"
             return None
-        if not self.target_range_history:
+
+        previous = self.tracked_target_range
+        if previous is None:
             self.target_range_history.append(current)
+            self.tracked_target_range = current
+            self.target_tracking_mode = "raw_initial"
             return current
 
-        previous = self._target_envelope(self.target_range_history)
-        assert previous is not None
-        overlap = min(previous[1], current[1]) - max(previous[0], current[0])
-        gap = max(0.0, max(previous[0], current[0]) - min(previous[1], current[1]))
+        previous_width = previous[1] - previous[0]
+        current_width = current[1] - current[0]
         union = (min(previous[0], current[0]), max(previous[1], current[1]))
         marker_gap = max(0.0, float(marker_width or 0.0)) * 0.75
         allowed_gap = max(float(self.config.gauge_target_tracking_max_gap_ratio), marker_gap)
         allowed_width = max(0.0, float(self.config.gauge_target_tracking_max_width_ratio))
+        overlap = min(previous[1], current[1]) - max(previous[0], current[0])
+        gap = max(0.0, max(previous[0], current[0]) - min(previous[1], current[1]))
 
-        if union[1] - union[0] <= allowed_width and (overlap >= 0.0 or gap <= allowed_gap):
+        # Contraction is the important safety path: replace the old span
+        # straight away and discard older envelope samples.
+        if current_width < previous_width - 1e-6:
+            self.target_range_history.clear()
             self.target_range_history.append(current)
-            envelope = self._target_envelope(self.target_range_history)
-            return envelope or current
+            self.tracked_target_range = current
+            self.target_tracking_mode = "raw_shrink"
+            return current
 
-        self.target_range_history.clear()
+        # A wider observation that still overlaps the previous target may be
+        # a genuine re-expansion or a stale occluded span.  In either case it
+        # must earn its way back into the click range over several frames;
+        # only a clearly disjoint target is allowed to reset immediately.
+        if current_width > previous_width + 1e-6:
+            if overlap < 0.0 and gap > allowed_gap:
+                self.target_range_history.clear()
+                self.target_range_history.append(current)
+                self.tracked_target_range = current
+                self.target_tracking_mode = "raw_reset_jump"
+                return current
+            self.target_range_history.append(current)
+            required = max(1, int(self.config.gauge_target_tracking_frames))
+            if len(self.target_range_history) < required:
+                self.target_tracking_mode = "hold_expansion"
+                return previous
+            envelope = self._target_envelope(self.target_range_history) or current
+            self.tracked_target_range = envelope
+            self.target_tracking_mode = "recovered_expansion"
+            return envelope
+
+        compatible = (
+            union[1] - union[0] <= allowed_width + 1e-6
+            and (overlap >= 0.0 or gap <= allowed_gap)
+        )
+        if not compatible:
+            self.target_range_history.clear()
+            self.target_range_history.append(current)
+            self.tracked_target_range = current
+            self.target_tracking_mode = "raw_reset_jump"
+            return current
+
         self.target_range_history.append(current)
+        self.tracked_target_range = current
+        self.target_tracking_mode = "raw_stable"
         return current
 
     def _water_activity(self, gray: np.ndarray, button: Box | None) -> float:
@@ -831,7 +967,6 @@ class FrameAnalyzer:
             # The prompt itself contains a yellow progress strip.  It is not
             # the later QTE bar and must not trigger QTE/quality states.
             work_gauge, gauge_score, marker_x, marker_width, target_range = None, 0.0, None, None, None
-        target_range = self._stabilize_target_range(work_gauge, target_range, marker_width)
         work_quality, quality_score, quality_pixels = detect_quality(work, work_button, work_gauge, self.config)
         gauge_state_visible = work_gauge is not None and gauge_score >= self.config.gauge_min_state_score
         quality_state_visible = work_quality is not None and gauge_state_visible
@@ -839,6 +974,28 @@ class FrameAnalyzer:
         button = _restore_box(work_button, scale, width, height)
         prompt = _restore_box(work_prompt, scale, width, height)
         gauge = _restore_box(work_gauge, scale, width, height)
+        raw_target_range = target_range
+        marker_source = "work" if marker_x is not None else "none"
+        marker_width_source = "work" if marker_width is not None else "none"
+        target_source = "work" if raw_target_range is not None else "none"
+        refinement = _GaugeRefinement(None, None, None, 0, 0)
+        if gauge is not None and self.config.gauge_full_res_refine_enabled:
+            refinement = refine_gauge_roi(frame, gauge, self.config)
+            if refinement.marker_x is not None:
+                marker_x = refinement.marker_x
+                marker_source = "full_res_roi"
+            if refinement.marker_width is not None:
+                marker_width = refinement.marker_width
+                marker_width_source = "full_res_roi"
+            if refinement.target_range is not None:
+                raw_target_range = refinement.target_range
+                target_source = "full_res_roi"
+        tracked_target_range = self._stabilize_target_range(
+            work_gauge,
+            raw_target_range,
+            marker_width,
+            marker_x,
+        )
         # Result detection runs on the original frame scale only through
         # ratios, so the luma calculation remains comparable across devices.
         original_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -899,8 +1056,23 @@ class FrameAnalyzer:
             "quality_pixels": quality_pixels,
             "prompt_progress": prompt_progress,
             "gauge_marker_width": round(marker_width, 5) if marker_width is not None else None,
-            "gauge_target_width": round(target_range[1] - target_range[0], 5) if target_range else None,
+            "gauge_target_width": round(tracked_target_range[1] - tracked_target_range[0], 5) if tracked_target_range else None,
             "gauge_target_track_samples": len(self.target_range_history),
+            "gauge_target_tracking_mode": self.target_tracking_mode,
+            "gauge_target_marker_occluded": self.target_marker_occluded,
+            "gauge_target_missing_frames": self.target_range_missing_frames,
+            "gauge_raw_target_range": list(raw_target_range) if raw_target_range else None,
+            "gauge_tracked_target_range": list(tracked_target_range) if tracked_target_range else None,
+            "gauge_safe_click_range": list(tracked_target_range) if tracked_target_range else None,
+            "gauge_refine": {
+                "enabled": bool(self.config.gauge_full_res_refine_enabled),
+                "attempted": gauge is not None and bool(self.config.gauge_full_res_refine_enabled),
+                "marker_source": marker_source,
+                "marker_width_source": marker_width_source,
+                "target_source": target_source,
+                "marker_pixels": refinement.marker_pixels,
+                "target_pixels": refinement.target_pixels,
+            },
             **button_features,
         }
         return Detection(
@@ -917,7 +1089,10 @@ class FrameAnalyzer:
             gauge_score=gauge_score,
             gauge_marker_x=marker_x,
             gauge_marker_width=marker_width,
-            gauge_target_range=target_range,
+            gauge_target_range=tracked_target_range,
+            gauge_raw_target_range=raw_target_range,
+            gauge_tracked_target_range=tracked_target_range,
+            gauge_safe_click_range=tracked_target_range,
             quality=work_quality,
             quality_score=quality_score,
             result_box=result_box,

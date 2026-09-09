@@ -107,6 +107,11 @@ class Detection:
     frame_age_s: float | None = None
     analysis_duration_s: float | None = None
     features: dict[str, Any] = field(default_factory=dict)
+    # Appended after the original fields to preserve positional-constructor
+    # compatibility. ``gauge_target_range`` remains the safe-range alias.
+    gauge_raw_target_range: tuple[float, float] | None = None
+    gauge_tracked_target_range: tuple[float, float] | None = None
+    gauge_safe_click_range: tuple[float, float] | None = None
 
     def normalized_point(self, box: Box | None = None) -> tuple[float, float] | None:
         target = box or self.action_button
@@ -129,6 +134,9 @@ class Detection:
             "gauge_marker_x": round(self.gauge_marker_x, 4) if self.gauge_marker_x is not None else None,
             "gauge_marker_width": round(self.gauge_marker_width, 4) if self.gauge_marker_width is not None else None,
             "gauge_target_range": list(self.gauge_target_range) if self.gauge_target_range else None,
+            "gauge_raw_target_range": list(self.gauge_raw_target_range) if self.gauge_raw_target_range else None,
+            "gauge_tracked_target_range": list(self.gauge_tracked_target_range) if self.gauge_tracked_target_range else None,
+            "gauge_safe_click_range": list(self.gauge_safe_click_range) if self.gauge_safe_click_range else None,
             "quality": self.quality,
             "quality_score": round(self.quality_score, 4),
             "result_box": self.result_box.to_dict() if self.result_box else None,
