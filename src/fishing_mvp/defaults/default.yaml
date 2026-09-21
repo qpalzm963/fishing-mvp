@@ -27,6 +27,8 @@ detector:
   gauge_target_min_width_px: 6
   gauge_target_min_column_coverage: 0.45
   gauge_marker_max_width_ratio: 0.35
+  gauge_full_res_refine_enabled: true
+  gauge_full_res_refine_padding_ratio: 0.12
   gauge_target_tracking_frames: 4
   gauge_target_tracking_max_width_ratio: 0.18
   gauge_target_tracking_max_gap_ratio: 0.06
@@ -52,10 +54,13 @@ action:
   min_action_interval_s: 0.45
   qte_min_interval_s: 0.18
   qte_target_margin: 0.05
+  qte_eta_enabled: true
+  qte_boundary_mode: auto
   qte_input_latency_s: 0.18
   qte_latency_sample_window: 5
   qte_velocity_samples: 3
   qte_min_velocity_norm_s: 0.12
+  qte_velocity_max_jitter_norm_s: 0.8
   qte_prediction_grace_s: 0.24
   # Re-detect result controls after each tap while the overlay remains.
   result_extra_tap_enabled: true

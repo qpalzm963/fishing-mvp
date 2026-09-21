@@ -82,3 +82,17 @@ def test_packaged_defaults_pass_strict_validation():
     assert load_config(root / "config/default.yaml").to_dict() == load_config(
         root / "src/fishing_mvp/defaults/default.yaml"
     ).to_dict()
+
+
+@pytest.mark.parametrize("mode", ["auto", "reflection", "clip"])
+def test_qte_boundary_mode_accepts_supported_modes(tmp_path, mode):
+    path = tmp_path / "user.yaml"
+    path.write_text(f"action:\n  qte_boundary_mode: {mode}\n", encoding="utf-8")
+    assert load_config(path).action.qte_boundary_mode == mode
+
+
+def test_qte_boundary_mode_rejects_unknown_mode(tmp_path):
+    path = tmp_path / "user.yaml"
+    path.write_text("action:\n  qte_boundary_mode: invalid\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="action.qte_boundary_mode"):
+        load_config(path)

@@ -57,11 +57,19 @@ def draw_overlay(
     if detection.gauge_box is not None and detection.gauge_marker_x is not None:
         x = int(detection.gauge_box.x + detection.gauge_marker_x * detection.gauge_box.w)
         cv2.line(output, (x, detection.gauge_box.y - 12), (x, detection.gauge_box.bottom + 12), (30, 30, 255), 5)
-    if detection.gauge_box is not None and detection.gauge_target_range is not None:
-        low, high = detection.gauge_target_range
-        x0 = int(detection.gauge_box.x + low * detection.gauge_box.w)
-        x1 = int(detection.gauge_box.x + high * detection.gauge_box.w)
-        cv2.line(output, (x0, detection.gauge_box.y - 20), (x1, detection.gauge_box.y - 20), (0, 215, 255), 8)
+    if detection.gauge_box is not None:
+        ranges = (
+            (detection.gauge_raw_target_range, (0, 150, 255), detection.gauge_box.y - 10, 5),
+            (detection.gauge_tracked_target_range, (255, 210, 0), detection.gauge_box.y - 20, 7),
+            (detection.gauge_safe_click_range or detection.gauge_target_range, (0, 215, 255), detection.gauge_box.y - 30, 9),
+        )
+        for target_range, colour, y, thickness in ranges:
+            if target_range is None:
+                continue
+            low, high = target_range
+            x0 = int(detection.gauge_box.x + low * detection.gauge_box.w)
+            x1 = int(detection.gauge_box.x + high * detection.gauge_box.w)
+            cv2.line(output, (x0, y), (x1, y), colour, thickness)
 
     if action is not None and action.x is not None and action.y is not None:
         cv2.circle(output, (action.x, action.y), 22, (0, 0, 255), 5)
@@ -86,6 +94,20 @@ def draw_overlay(
         lines.append(
             f"gauge_marker={detection.gauge_marker_x:.3f}{marker_width} "
             f"target={detection.gauge_target_range or '-'}{target_width}"
+        )
+    qte = detection.features.get("qte")
+    if isinstance(qte, dict):
+        raw = detection.gauge_raw_target_range or qte.get("raw_target_range") or "-"
+        tracked = detection.gauge_tracked_target_range or qte.get("tracked_target_range") or "-"
+        safe = detection.gauge_safe_click_range or qte.get("safe_click_range") or detection.gauge_target_range or "-"
+        lines.append(f"qte_ranges raw={raw} tracked={tracked} safe={safe}")
+        lines.append(
+            f"qte_timing v={qte.get('velocity', '-')} eta={qte.get('eta', '-')} "
+            f"input={qte.get('input_eta', '-')} window={qte.get('timing_window', '-')}"
+        )
+        lines.append(
+            f"qte_decision={qte.get('decision', '-')} boundary={qte.get('boundary_mode', '-')} "
+            f"reflected={qte.get('reflection_applied', False)}"
         )
     panel_height = 42 + 34 * len(lines)
     overlay = output.copy()
