@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from fishing_mvp.config import load_config
 
 
@@ -27,3 +29,56 @@ def test_load_config_without_files_keeps_dataclass_defaults():
 
     assert config.capture_fps == 10.0
     assert config.qte_capture_fps == 30.0
+
+
+@pytest.mark.parametrize("text, field", [
+    ("capture_fpz: 10", "capture_fpz"),
+    ("action:\n  qte_enable: true", "action.qte_enable"),
+    ("action: null", "action"),
+    ("detector: []", "detector"),
+    ("[]", "config"),
+    ("false", "config"),
+    ('action:\n  qte_enabled: "false"', "action.qte_enabled"),
+    ("action:\n  qte_velocity_samples: 2.5", "action.qte_velocity_samples"),
+    ("capture_fps: true", "capture_fps"),
+    ('capture_fps: "30"', "capture_fps"),
+    ("capture_fps: .nan", "capture_fps"),
+    ("action:\n  qte_input_latency_s: .inf", "action.qte_input_latency_s"),
+    ("capture_fps: 0", "capture_fps"),
+    ("qte_capture_fps: -1", "qte_capture_fps"),
+    ("action:\n  min_confidence: 1.1", "action.min_confidence"),
+    ("action:\n  tap_hold_ms: -1", "action.tap_hold_ms"),
+    ("state_machine:\n  stable_frames: 0", "state_machine.stable_frames"),
+    ("scrcpy:\n  frame_timeout_s: 0", "scrcpy.frame_timeout_s"),
+    ("detector:\n  min_saturation: 256", "detector.min_saturation"),
+    ("detector:\n  purple_hue_high: 180", "detector.purple_hue_high"),
+    ("detector:\n  button_min_y_ratio: 0.95", "detector.button_min_y_ratio"),
+    ("detector:\n  prompt_min_aspect: 20", "detector.prompt_min_aspect"),
+])
+def test_invalid_config_reports_field(tmp_path, text, field):
+    path = tmp_path / "invalid.yaml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=field):
+        load_config(path)
+
+
+def test_malformed_yaml_reports_file(tmp_path):
+    path = tmp_path / "broken.yaml"
+    path.write_text("action: [", encoding="utf-8")
+    with pytest.raises(ValueError, match="broken.yaml"):
+        load_config(path)
+
+
+def test_bounds_validate_after_merging_overrides(tmp_path):
+    base = tmp_path / "base.yaml"
+    override = tmp_path / "user.yaml"
+    base.write_text("detector:\n  prompt_max_aspect: 12\n", encoding="utf-8")
+    override.write_text("detector:\n  prompt_min_aspect: 15\n  prompt_max_aspect: 20\n", encoding="utf-8")
+    assert load_config(override, base_path=base).detector.prompt_min_aspect == 15
+
+
+def test_packaged_defaults_pass_strict_validation():
+    root = Path(__file__).resolve().parents[1]
+    assert load_config(root / "config/default.yaml").to_dict() == load_config(
+        root / "src/fishing_mvp/defaults/default.yaml"
+    ).to_dict()

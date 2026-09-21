@@ -445,3 +445,71 @@ def test_result_is_held_for_configured_animation_window():
     state, transition = machine.update(make_detection(25, FishingState.WAITING))
     assert state == FishingState.WAITING
     assert transition is not None
+
+
+def test_qte_reused_frames_neither_change_velocity_history_nor_tap():
+    planner = ActionPlanner(ActionConfig(qte_enabled=True))
+    first = make_detection(0, FishingState.QTE)
+    first.gauge_marker_x = 0.1
+    first.frame_pts_us = 0
+    planner.plan(first, FishingState.QTE)
+    second = make_detection(1, FishingState.QTE)
+    second.gauge_marker_x = 0.2
+    second.frame_pts_us = 100_000
+    planner.plan(second, FishingState.QTE)
+    history = list(planner.qte_samples)
+    for index in range(2, 6):
+        reused = make_detection(index, FishingState.QTE)
+        reused.frame_reused = True
+        reused.frame_pts_us = 100_000
+        assert planner.plan(reused, FishingState.QTE) is None
+        planner._predict_marker(reused)
+    assert list(planner.qte_samples) == history
+    fresh = make_detection(6, FishingState.QTE)
+    fresh.frame_pts_us = 200_000
+    fresh.gauge_marker_x = 0.3
+    _, velocity, _ = planner._predict_marker(fresh)
+    assert abs(velocity - 1.0) < 1e-6
+
+
+def test_qte_uses_pts_instead_of_irregular_analysis_time():
+    planner = ActionPlanner(ActionConfig())
+    first = make_detection(0, FishingState.QTE)
+    first.frame_pts_us = 0
+    first.gauge_marker_x = 0.1
+    planner._predict_marker(first)
+    second = make_detection(9, FishingState.QTE)
+    second.frame_pts_us = 100_000
+    second.gauge_marker_x = 0.2
+    _, velocity, _ = planner._predict_marker(second)
+    assert abs(velocity - 1.0) < 1e-6
+    # An encoder/source restart must not mix time bases.
+    second.frame_pts_us = 0
+    _, velocity, _ = planner._predict_marker(second)
+    assert velocity is None
+
+
+def test_qte_duplicate_pts_without_reused_flag_cannot_tap():
+    planner = ActionPlanner(ActionConfig(qte_enabled=True))
+    first = make_detection(0, FishingState.QTE)
+    first.frame_pts_us = 1
+    first.gauge_marker_x = 0.1
+    assert planner.plan(first, FishingState.QTE) is None
+    duplicate = make_detection(1, FishingState.QTE)
+    duplicate.frame_pts_us = 1
+    assert planner.plan(duplicate, FishingState.QTE) is None
+    assert len(planner.qte_samples) == 1
+
+
+def test_qte_falls_back_to_decode_time_and_resets_when_clock_changes():
+    planner = ActionPlanner(ActionConfig())
+    first = make_detection(0, FishingState.QTE)
+    first.frame_decoded_s = 1.0
+    first.gauge_marker_x = 0.1
+    planner._predict_marker(first)
+    second = make_detection(9, FishingState.QTE)
+    second.frame_decoded_s = 1.1
+    second.gauge_marker_x = 0.2
+    assert abs(planner._predict_marker(second)[1] - 1.0) < 1e-6
+    second.frame_pts_us = 100_000
+    assert planner._predict_marker(second)[1] is None

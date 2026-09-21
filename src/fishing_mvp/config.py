@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
+import math
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 
 import yaml
 
@@ -126,12 +127,83 @@ class AppConfig:
         return asdict(self)
 
 
-def _update_dataclass(instance: Any, values: dict[str, Any]) -> Any:
-    valid = {item.name for item in fields(instance)}
+def _update_dataclass(instance: Any, values: Any, prefix: str = "") -> Any:
+    if not isinstance(values, dict):
+        raise ValueError(f"{prefix or 'config'}: expected a mapping")
+    valid = get_type_hints(type(instance))
     for key, value in values.items():
-        if key in valid:
-            setattr(instance, key, value)
+        name = f"{prefix}.{key}" if prefix else str(key)
+        if key not in valid:
+            raise ValueError(f"{name}: unknown config field")
+        current = getattr(instance, key)
+        if is_dataclass(current):
+            _update_dataclass(current, value, name)
+        else:
+            _validate_type(name, value, valid[key])
+            setattr(instance, key, float(value) if valid[key] is float else value)
     return instance
+
+
+def _validate_type(name: str, value: Any, expected: type) -> None:
+    allowed = (int, float) if expected is float else (expected,)
+    if type(value) not in allowed:
+        raise ValueError(f"{name}: expected {expected.__name__}, got {type(value).__name__}")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{name}: must be finite")
+
+
+def validate_config(config: AppConfig) -> None:
+    """Reject unsafe types, ranges and inverted bounds before device access."""
+    positive = {
+        "detector.max_work_width", "detector.gauge_min_color_pixels",
+        "detector.gauge_target_min_color_pixels", "detector.gauge_target_min_width_px",
+        "detector.gauge_target_tracking_frames", "detector.quality_min_pixels",
+        "detector.prompt_min_aspect", "detector.prompt_max_aspect",
+        "detector.gauge_min_aspect", "detector.gauge_min_width_button_radius",
+        "state_machine.stable_frames", "action.qte_latency_sample_window",
+        "action.qte_velocity_samples", "action.result_max_attempts",
+        "scrcpy.max_fps", "scrcpy.video_bit_rate",
+        "scrcpy.connect_timeout_s", "scrcpy.frame_timeout_s",
+    }
+    unit_fields = {
+        "button_min_y_ratio", "button_max_y_ratio", "prompt_min_fill_ratio",
+        "gauge_target_min_column_coverage", "gauge_min_state_score",
+        "min_confidence", "qte_target_margin",
+    }
+    byte_fields = {"min_saturation", "min_value", "button_active_saturation", "result_dark_luma", "motion_threshold"}
+
+    def check(instance: Any, prefix: str = "") -> None:
+        types = get_type_hints(type(instance))
+        for item in fields(instance):
+            value = getattr(instance, item.name)
+            name = f"{prefix}.{item.name}" if prefix else item.name
+            if is_dataclass(value):
+                check(value, name)
+                continue
+            _validate_type(name, value, types[item.name])
+            if isinstance(value, bool):
+                continue
+            if value < 0 or (name in positive and value == 0):
+                raise ValueError(f"{name}: must be {'positive' if name in positive else 'non-negative'}")
+            if item.name.endswith("_ratio") or item.name in unit_fields:
+                if value > 1:
+                    raise ValueError(f"{name}: must be between 0 and 1")
+            if item.name in byte_fields and value > 255:
+                raise ValueError(f"{name}: must be between 0 and 255")
+            if item.name.startswith("purple_hue_") and value > 179:
+                raise ValueError(f"{name}: must be between 0 and 179")
+            if name in {"capture_fps", "qte_capture_fps"} and value < 0.5:
+                raise ValueError(f"{name}: must be at least 0.5")
+
+    check(config)
+    for low, high in (
+        ("purple_hue_low", "purple_hue_high"),
+        ("button_min_radius_ratio", "button_max_radius_ratio"),
+        ("button_min_y_ratio", "button_max_y_ratio"),
+        ("prompt_min_aspect", "prompt_max_aspect"),
+    ):
+        if getattr(config.detector, low) > getattr(config.detector, high):
+            raise ValueError(f"detector.{low}: must not exceed detector.{high}")
 
 
 def load_config(
@@ -154,22 +226,16 @@ def load_config(
 
     def apply_file(config_path: str | Path) -> None:
         config_path = Path(config_path)
-        with config_path.open("r", encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
-        if not isinstance(data, dict):
-            raise ValueError(f"Config must be a mapping: {config_path}")
-        _update_dataclass(config.detector, data.get("detector", {}))
-        _update_dataclass(config.state_machine, data.get("state_machine", {}))
-        _update_dataclass(config.action, data.get("action", {}))
-        _update_dataclass(config.automation, data.get("automation", {}))
-        _update_dataclass(config.scrcpy, data.get("scrcpy", {}))
-        if "capture_fps" in data:
-            config.capture_fps = float(data["capture_fps"])
-        if "qte_capture_fps" in data:
-            config.qte_capture_fps = float(data["qte_capture_fps"])
+        try:
+            with config_path.open("r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle)
+            _update_dataclass(config, {} if data is None else data)
+        except (ValueError, yaml.YAMLError) as exc:
+            raise ValueError(f"{config_path}: {exc}") from exc
 
     if base_path is not None:
         apply_file(base_path)
     if path is not None:
         apply_file(path)
+    validate_config(config)
     return config

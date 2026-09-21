@@ -277,7 +277,8 @@ exit /b %ERRORLEVEL%
     $runtimeReadmeContent = @"
 This directory is the self-contained fishing-mvp runtime.
 
-Use fishing-mvp.cmd as the entrypoint. It prepends the scrcpy subdirectory to
+Double-click START.bat in the parent directory for the interactive console.
+Use fishing-mvp.cmd for developer CLI commands. It prepends the scrcpy subdirectory to
 PATH so the bundled scrcpy.exe and adb.exe are used without a system install.
 The Python application is FishingMVP.exe; its PyInstaller support files are
 kept beside it.
@@ -298,12 +299,18 @@ baseline. You can also pass another YAML file explicitly with --config.
 
     foreach ($launcherPath in $launcherPaths) {
         Copy-Item -LiteralPath $launcherPath -Destination (Join-Path $outputRoot ([System.IO.Path]::GetFileName($launcherPath))) -Force
+        if ([System.IO.Path]::GetExtension($launcherPath) -eq '.bat') {
+            $destination = Join-Path $outputRoot ([System.IO.Path]::GetFileName($launcherPath))
+            $text = [System.IO.File]::ReadAllText($destination)
+            $text = $text -replace "`r?`n", "`r`n"
+            [System.IO.File]::WriteAllText($destination, $text, [System.Text.UTF8Encoding]::new($false))
+        }
     }
     Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $outputRoot "runtime-manifest.json") -Force
 
     Write-Host ""
     Write-Host "Portable package created: $outputRoot"
-    Write-Host "Entry point: $(Join-Path $runtimeDirectory 'fishing-mvp.cmd')"
+    Write-Host "Double-click to start: $(Join-Path $outputRoot 'START.bat')"
     Write-Host "Config template: $(Join-Path $configDirectory 'default.yaml')"
 }
 finally {

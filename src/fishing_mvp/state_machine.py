@@ -108,6 +108,7 @@ class ActionPlanner:
     qte_seen_inside: bool = False
     qte_predicted_only: bool = False
     qte_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=8))
+    qte_sample_clock: tuple[str | None, str] | None = None
     dispatch_latency_samples: dict[str, deque[float]] = field(default_factory=dict)
     result_handled: bool = False
     result_extra_tap_handled: bool = False
@@ -129,6 +130,7 @@ class ActionPlanner:
             self.qte_seen_inside = False
             self.qte_predicted_only = False
             self.qte_samples.clear()
+            self.qte_sample_clock = None
         if state != FishingState.RESULT:
             self.result_handled = False
             self.result_extra_tap_handled = False
@@ -175,6 +177,13 @@ class ActionPlanner:
             and detection.gauge_marker_x is not None
             and detection.gauge_target_range is not None
         ):
+            sample_clock, sample_time = self._sample_time(detection)
+            if detection.frame_reused or (
+                self.qte_samples
+                and self.qte_sample_clock == sample_clock
+                and self.qte_samples[-1][0] == sample_time
+            ):
+                return None
             predicted, velocity, horizon = self._predict_marker(detection)
             in_target = self._marker_in_target(
                 detection.gauge_marker_x,
@@ -319,17 +328,23 @@ class ActionPlanner:
     def _predict_marker(self, detection: Detection) -> tuple[float | None, float | None, float]:
         """Predict marker position when the Android input will land.
 
-        The detector timestamp is taken immediately after a frame is read,
-        while the touch arrives after analysis and ADB input dispatch.  A
-        short, robust median velocity over recent observations compensates for
-        that delay without using any fixed screen coordinate.
+        Source PTS (or decode time when PTS is unavailable) measures motion
+        independently of analysis cadence. Frame age, analysis duration and
+        input dispatch latency determine the prediction horizon.
         """
 
         marker = detection.gauge_marker_x
-        if marker is None:
+        if marker is None or detection.frame_reused:
             return None, None, 0.0
-        self.qte_samples.append((detection.timestamp_s, marker))
+        clock, sample_time = self._sample_time(detection)
+        if clock != self.qte_sample_clock or (self.qte_samples and sample_time < self.qte_samples[-1][0]):
+            self.qte_samples.clear()
+        self.qte_sample_clock = clock
         window = max(1, int(self.config.qte_velocity_samples))
+        if self.qte_samples.maxlen != window + 1:
+            self.qte_samples = deque(self.qte_samples, maxlen=window + 1)
+        if not self.qte_samples or sample_time != self.qte_samples[-1][0]:
+            self.qte_samples.append((sample_time, marker))
         samples = list(self.qte_samples)[-(window + 1) :]
         velocities: list[float] = []
         for (t0, x0), (t1, x1) in zip(samples, samples[1:]):
@@ -354,6 +369,16 @@ class ActionPlanner:
             return None, velocity, horizon
         predicted = float(min(1.0, max(0.0, marker + velocity * horizon)))
         return predicted, velocity, horizon
+
+    @staticmethod
+    def _sample_time(detection: Detection) -> tuple[tuple[str | None, str], float]:
+        # Use the source clock for motion, and keep local monotonic time for
+        # cooldowns. Reset history whenever the source or time basis changes.
+        if detection.frame_pts_us is not None:
+            return (detection.source_mode, "pts"), detection.frame_pts_us / 1_000_000.0
+        if detection.frame_decoded_s is not None:
+            return (detection.source_mode, "decoded"), detection.frame_decoded_s
+        return (detection.source_mode, "analysis"), detection.timestamp_s
 
     def _dispatch_latency_for(self, source_mode: str | None) -> float:
         key = "adb" if source_mode and source_mode.startswith("adb") else "scrcpy" if source_mode and source_mode.startswith("scrcpy") else source_mode or "unknown"

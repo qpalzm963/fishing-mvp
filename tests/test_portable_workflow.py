@@ -59,6 +59,7 @@ def test_smoke_tests_target_the_assembled_portable_directory() -> None:
     assert "PyAV files were not found in the frozen portable package" in workflow
     assert "Compress-Archive" in workflow
     assert "uses: actions/upload-artifact@v4" in workflow
+    assert 'python packaging/smoke_portable_ui.py "$env:PACKAGE_ROOT"' in workflow
 
 
 def test_release_publish_is_gated_and_permissions_are_minimal() -> None:

@@ -109,3 +109,15 @@ def test_max_rounds_accepts_values_in_strict_launcher_contract(value):
     args = cli.build_parser().parse_args(["live", "--serial", "phone-1", "--max-rounds", value])
 
     assert args.max_rounds == int(value)
+
+
+@pytest.mark.parametrize("option,value", [("--fps", "-1"), ("--qte-fps", "0"), ("--fps", "nan")])
+def test_live_rejects_invalid_fps_before_device_access(monkeypatch, tmp_path, option, value):
+    from fishing_mvp import live
+    from fishing_mvp.config import AppConfig
+
+    monkeypatch.setattr(cli, "_config", lambda path: AppConfig())
+    def unexpected_controller(*args, **kwargs):
+        pytest.fail("invalid config must fail before device access")
+    monkeypatch.setattr(live, "ADBController", unexpected_controller)
+    assert cli.main(["live", "--serial", "phone", "--output-dir", str(tmp_path), option, value]) == 2

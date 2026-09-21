@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .actions import ADBController
 from .capture import LiveFrameSource, create_live_frame_source, scrcpy_status
-from .config import AppConfig
+from .config import AppConfig, validate_config
 from .debug import draw_overlay, save_snapshot
-from .models import Action, Detection, FishingState, FrameMetadata
+from .models import Action, Detection, FishingState, FrameMetadata, StateTransition
 from .state_machine import ActionPlanner, AutomationProgress, FishingStateMachine
 from .vision import FrameAnalyzer
+
+
+logger = logging.getLogger(__name__)
 
 
 def _map_action_to_device(
@@ -121,6 +125,53 @@ def _timing_record(
     }
 
 
+def _observe_qte_actions(
+    pending_actions: list[dict[str, Any]],
+    detection: Detection,
+    transition: StateTransition | None,
+    *,
+    timeout_s: float,
+) -> list[dict[str, Any]]:
+    """Resolve observations once, keeping only the current bounded window."""
+    observations: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    for pending in pending_actions:
+        dispatched_at = pending.get("dispatch_end_s", pending["timestamp_s"])
+        elapsed = max(0.0, detection.timestamp_s - dispatched_at)
+        event: dict[str, Any] = {"action_timestamp_s": pending["timestamp_s"]}
+        fresh = (
+            not detection.frame_reused
+            and detection.frame_index > pending["loop_frame_index"]
+            and (detection.frame_pts_us is None or detection.frame_pts_us != pending.get("frame_pts_us"))
+            and (detection.frame_decoded_s is None or detection.frame_decoded_s >= dispatched_at)
+        )
+        if elapsed >= timeout_s:
+            pending["observation_status"] = "timed_out"
+            event["observation_status"] = "timed_out"
+        else:
+            if fresh and pending.get("first_following_frame_s") is None:
+                pending["first_following_frame_s"] = detection.timestamp_s
+                pending["first_following_frame_latency_ms"] = round(elapsed * 1000.0, 2)
+                event["first_following_frame_latency_ms"] = pending["first_following_frame_latency_ms"]
+            if (
+                fresh
+                and transition is not None
+                and transition.from_state in {FishingState.QTE, FishingState.QUALITY}
+                and transition.to_state not in {FishingState.QTE, FishingState.QUALITY}
+            ):
+                pending["state_transition_observed_s"] = detection.timestamp_s
+                pending["state_transition_latency_ms"] = round(elapsed * 1000.0, 2)
+                pending["observation_status"] = "completed"
+                event["state_transition_latency_ms"] = pending["state_transition_latency_ms"]
+                event["observation_status"] = "completed"
+            else:
+                remaining.append(pending)
+        if len(event) > 1:
+            observations.append(event)
+    pending_actions[:] = remaining
+    return observations
+
+
 def run_live(
     serial: str,
     package: str | None,
@@ -135,7 +186,10 @@ def run_live(
     max_rounds: int | None = None,
     adb_path: str | None = None,
     scrcpy_executable: str | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+    on_progress: Callable[[FishingState, int, int | None, float], None] | None = None,
 ) -> dict[str, Any]:
+    validate_config(config)
     output_dir = Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "snapshots").mkdir(parents=True, exist_ok=True)
@@ -143,27 +197,13 @@ def run_live(
         raise ValueError("max_rounds must be at least 1")
     effective_qte = bool(qte_enabled or full_auto)
     effective_continue = bool(auto_continue or full_auto)
+    config = replace(config, action=replace(config.action))
     config.action.auto_start = bool(full_auto)
     config.action.qte_enabled = effective_qte
     config.action.auto_continue = effective_continue
     controller = ADBController(serial, adb_path=adb_path or "adb")
-    controller.assert_connected()
-    if package is not None:
-        foreground = controller.foreground_package()
-        if foreground != package:
-            raise RuntimeError(f"Foreground package mismatch: expected={package}, actual={foreground}")
-
-    source, fallback_note = create_live_frame_source(
-        controller,
-        mode=capture_mode,
-        fps=config.capture_fps,
-        scrcpy_max_size=config.scrcpy.max_size,
-        scrcpy_max_fps=config.scrcpy.max_fps,
-        scrcpy_video_bit_rate=config.scrcpy.video_bit_rate,
-        scrcpy_connect_timeout_s=config.scrcpy.connect_timeout_s,
-        scrcpy_frame_timeout_s=config.scrcpy.frame_timeout_s,
-        scrcpy_executable=scrcpy_executable,
-    )
+    source: LiveFrameSource | None = None
+    fallback_note: str | None = None
     analyzer = FrameAnalyzer(config.detector)
     machine = FishingStateMachine(config.state_machine)
     planner = ActionPlanner(config.action)
@@ -183,13 +223,46 @@ def run_live(
     log_path = output_dir / "live_detections.jsonl"
     device_size = None
     stop_reason: str | None = None
-    if fallback_note:
-        print(f"capture: {fallback_note}")
+    failure: Exception | None = None
+    error: dict[str, str] | None = None
+    capture_info: dict[str, Any] = {}
+    warning_counts: dict[str, int] = {}
+    last_warning: str | None = None
+
+    def warn(kind: str, exc: Exception) -> None:
+        nonlocal last_warning
+        warning_counts[kind] = warning_counts.get(kind, 0) + 1
+        last_warning = f"{kind}: {exc}"
+        logger.warning(last_warning)
+
     try:
+        controller.assert_connected()
+        if package is not None:
+            foreground = controller.foreground_package()
+            if foreground != package:
+                raise RuntimeError(f"Foreground package mismatch: expected={package}, actual={foreground}")
+
+        source, fallback_note = create_live_frame_source(
+            controller,
+            mode=capture_mode,
+            fps=config.capture_fps,
+            scrcpy_max_size=config.scrcpy.max_size,
+            scrcpy_max_fps=config.scrcpy.max_fps,
+            scrcpy_video_bit_rate=config.scrcpy.video_bit_rate,
+            scrcpy_connect_timeout_s=config.scrcpy.connect_timeout_s,
+            scrcpy_frame_timeout_s=config.scrcpy.frame_timeout_s,
+            scrcpy_executable=scrcpy_executable,
+        )
+
+        if fallback_note:
+            print(f"capture: {fallback_note}")
         device_size = controller.display_size()
         with log_path.open("w", encoding="utf-8") as log:
             try:
                 while True:
+                    if stop_requested is not None and stop_requested():
+                        stop_reason = "user_stop"
+                        break
                     if max_seconds is not None and time.monotonic() - start > max_seconds:
                         stop_reason = "max_seconds"
                         break
@@ -227,37 +300,10 @@ def run_live(
                     )
                     state, transition = machine.update(detection)
                     sampling_state = state
-                    qte_observations: list[dict[str, Any]] = []
-                    for pending in pending_qte_actions:
-                        if pending.get("first_following_frame_s") is None and frame_index > pending["loop_frame_index"]:
-                            pending["first_following_frame_s"] = timestamp_s
-                            pending["first_following_frame_latency_ms"] = round(
-                                (timestamp_s - pending["timestamp_s"]) * 1000.0,
-                                2,
-                            )
-                            qte_observations.append(
-                                {
-                                    "action_timestamp_s": pending["timestamp_s"],
-                                    "first_following_frame_latency_ms": pending["first_following_frame_latency_ms"],
-                                }
-                            )
-                        if (
-                            pending.get("state_transition_observed_s") is None
-                            and transition is not None
-                            and transition.from_state in {FishingState.QTE, FishingState.QUALITY}
-                            and transition.to_state not in {FishingState.QTE, FishingState.QUALITY}
-                        ):
-                            pending["state_transition_observed_s"] = timestamp_s
-                            pending["state_transition_latency_ms"] = round(
-                                (timestamp_s - pending["timestamp_s"]) * 1000.0,
-                                2,
-                            )
-                            qte_observations.append(
-                                {
-                                    "action_timestamp_s": pending["timestamp_s"],
-                                    "state_transition_latency_ms": pending["state_transition_latency_ms"],
-                                }
-                            )
+                    qte_observations = _observe_qte_actions(
+                        pending_qte_actions, detection, transition,
+                        timeout_s=max(config.automation.qte_timeout_s, config.automation.quality_timeout_s),
+                    )
                     if automation is not None:
                         automation.observe(state, timestamp_s, transition)
                         if automation.timed_out(timestamp_s, config.automation):
@@ -286,8 +332,12 @@ def run_live(
                         transition_dict = transition.to_dict()
                         transitions.append(transition_dict)
                         record["transition"] = transition_dict
-                        save_snapshot(draw_overlay(frame, detection, state, action), output_dir / "snapshots" / f"{len(transitions):03d}_{state.value}_{timestamp_s:07.2f}.jpg")
                     if action is not None:
+                        # A stop may arrive during capture/analysis; check again
+                        # immediately before dispatching another device input.
+                        if stop_requested is not None and stop_requested():
+                            stop_reason = "user_stop"
+                            break
                         if send_actions and device_size is None and action.x_norm is not None:
                             raise RuntimeError("Device display size is unavailable; refusing to send normalized coordinates")
                         sent_action = _map_action_to_device(
@@ -339,10 +389,21 @@ def run_live(
                         if state == FishingState.QTE:
                             pending_qte_actions.append(action_record)
                         actions.append(action_record)
+                    if transition is not None:
+                        try:
+                            save_snapshot(
+                                draw_overlay(frame, detection, state, action),
+                                output_dir / "snapshots" / f"{len(transitions):03d}_{state.value}_{timestamp_s:07.2f}.jpg",
+                            )
+                        except Exception as exc:
+                            warn("snapshot_failed", exc)
+                            record["snapshot_error"] = str(exc)
                     log.write(json.dumps(record, ensure_ascii=False) + "\n")
                     log.flush()
                     print(f"t={timestamp_s:7.2f}s state={state.value:8s} conf={detection.confidence:.2f} action={'sent' if send_actions and action else 'proposal' if action else '-'}")
                     frame_index += 1
+                    if on_progress is not None:
+                        on_progress(state, automation.completed_rounds if automation else 0, target_rounds, timestamp_s)
                     if automation is not None and automation.stop_reason is not None:
                         stop_reason = automation.stop_reason
                         break
@@ -350,18 +411,49 @@ def run_live(
                     next_frame = max(next_frame + 1.0 / sample_fps, time.monotonic())
             except KeyboardInterrupt:
                 stop_reason = "keyboard_interrupt"
+    except KeyboardInterrupt:
+        stop_reason = "keyboard_interrupt"
+    except Exception as exc:
+        failure = exc
+        stop_reason = "error"
+        error = {"type": type(exc).__name__, "message": str(exc)}
     finally:
-        source.close()
+        if source is not None:
+            try:
+                capture_info = source.info()
+            except Exception as exc:
+                warn("capture_info_failed", exc)
+            try:
+                source.close()
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+                    stop_reason = "error"
+                    error = {"type": type(exc).__name__, "message": str(exc)}
+                else:
+                    warn("cleanup_failed", exc)
+    for pending in pending_qte_actions:
+        pending["observation_status"] = "session_stopped"
+    pending_qte_actions.clear()
+    try:
+        scrcpy_info = scrcpy_status(scrcpy_executable)
+    except Exception as exc:
+        warn("scrcpy_status_failed", exc)
+        scrcpy_info = {"error": str(exc)}
     summary = {
         "serial": serial,
         "package": package,
         "capture_mode_requested": capture_mode,
-        "capture": source.info(),
+        "capture": capture_info,
         "send_actions": send_actions,
         "full_auto": full_auto,
         "max_rounds": target_rounds,
         "completed_rounds": automation.completed_rounds if automation is not None else 0,
         "stop_reason": stop_reason or (automation.stop_reason if automation is not None else None),
+        "error": error,
+        "last_state": sampling_state.value,
+        "warning_counts": warning_counts,
+        "last_warning": last_warning,
         "auto_start": full_auto,
         "qte_enabled": effective_qte,
         "auto_continue": effective_continue,
@@ -371,7 +463,7 @@ def run_live(
         "actions": actions,
         "input_path_counts": input_path_counts,
         "qte_dispatch_latency_estimates_ms": planner.latency_estimates(),
-        "scrcpy": scrcpy_status(scrcpy_executable),
+        "scrcpy": scrcpy_info,
         "log": str(log_path),
         "notes": [
             "Live runner stops on ADB errors, foreground changes, or screen-size changes.",
@@ -381,5 +473,17 @@ def run_live(
             *([fallback_note] if fallback_note else []),
         ],
     }
-    (output_dir / "live_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        summary_path = output_dir / "live_summary.json"
+        temporary_path = summary_path.with_suffix(".json.tmp")
+        temporary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary_path.replace(summary_path)
+    except OSError as exc:
+        if failure is None:
+            raise RuntimeError(f"Unable to save live summary: {exc}") from exc
+        logger.error("Unable to save live summary: %s", exc)
+    if failure is not None:
+        if isinstance(failure, RuntimeError):
+            raise failure
+        raise RuntimeError(f"Live run failed: {failure}") from failure
     return summary

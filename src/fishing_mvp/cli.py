@@ -171,6 +171,8 @@ def build_parser() -> argparse.ArgumentParser:
     discover = subparsers.add_parser("discover-device", help="Safely select exactly one authorized ADB device")
     discover.add_argument("--adb-path", help="ADB executable path; frozen builds use the bundled copy")
     discover.add_argument("--json", action="store_true", help="Write one machine-readable JSON object")
+    subparsers.add_parser("portable-start", help="Interactive Chinese console for the Windows portable package")
+    subparsers.add_parser("portable-stop", help="Request a graceful stop of this portable session")
     return parser
 
 
@@ -178,6 +180,10 @@ def main(argv: list[str] | None = None) -> int:
     _configure_utf8_stdio()
     args = build_parser().parse_args(argv)
     try:
+        if args.command in {"portable-start", "portable-stop"}:
+            from .portable_console import start_console, stop_console
+
+            return (start_console if args.command == "portable-start" else stop_console)(PortablePaths.current())
         if args.command in {"analyze-video", "debug"}:
             config = _config(args.config)
             if args.full_auto:
@@ -197,9 +203,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "live":
             config = _config(args.config)
             if args.fps is not None:
-                config.capture_fps = max(0.5, args.fps)
+                config.capture_fps = args.fps
             if args.qte_fps is not None:
-                config.qte_capture_fps = max(0.5, args.qte_fps)
+                config.qte_capture_fps = args.qte_fps
             summary = run_live(
                 serial=args.serial,
                 package=args.package,

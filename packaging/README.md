@@ -1,6 +1,6 @@
 # Windows portable packaging contract
 
-This directory is the Issue #3 preparation layer. It packages the existing
+This directory packages the existing
 `python -m fishing_mvp` / `fishing-mvp` CLI as a Windows x64 PyInstaller
 onedir runtime and does not change gameplay or detector behavior.
 
@@ -45,18 +45,40 @@ build/fishing-mvp-windows/
   runtime-manifest.json
 ```
 
-Use the root `START.bat` for the operator flow. It asks for a strict 1–999
-round count, discovers exactly one authorized device, resolves the current
-foreground package, and starts the real live full-auto path with that package
-as a safety boundary. `runtime\fishing-mvp.cmd` is the developer entrypoint;
-both entrypoints resolve bundled tools without a system-wide scrcpy/ADB
-installation. The script never overwrites an existing `runtime/`, `config/`,
-or manifest artifact, so use a new output directory for each build.
+Use root `START.bat` for the operator flow. The batch wrapper calls frozen
+`portable-start` in the same console and pauses on every exit path, including
+missing-runtime errors. The interactive Python flow defaults to one round,
+validates 1–999, allows correction/retry, discovers exactly one authorized
+device and checks its foreground package before starting live full-auto with
+scrcpy required. It shows Chinese stage/round progress instead of raw JSON.
+
+`STOP.bat` calls `portable-stop`. Each active run publishes its PID and a unique
+session token. Stop verifies the actual process executable path using Windows
+QueryFullProcessImageNameW and writes a token-scoped request. The live loop
+checks that request before capture and again before input, then closes its
+source and saves its summary. STOP waits up to ten seconds for cleanup; if it
+is still waiting, it reports that accurately and never kills unrelated tasks.
+A Windows file lock prevents concurrent launchers; the OS releases it after
+abnormal termination. Stale session records are cleared only by a new lock owner.
+
+Each attempt keeps its own `run/sessions/<timestamp>-<id>/` containing
+`diagnostics.log`, `live_summary.json` when available, detections and snapshots.
+A retry starts a new set of the requested rounds and never overwrites prior
+attempts. If the process is forcibly terminated or the window is closed, cleanup
+and summary writing cannot be guaranteed; use STOP or Ctrl+C.
+
+`runtime\fishing-mvp.cmd` remains the developer CLI entrypoint. Both entrypoints
+resolve bundled tools without a system-wide scrcpy/ADB installation. The build
+script never overwrites existing runtime/config/manifest artifacts; use a new
+output directory for each build.
 
 The assembled smoke contract runs `runtime-smoke` through the frozen executable
 to import PyAV, create an H.264 decoder, and load the packaged config. It also
 runs frozen `discover-device` with bundled ADB and expects the controlled
 `no_devices` response on a device-free CI runner.
+`smoke_portable_ui.py` also exercises frozen cancellation, invalid-round retry,
+the no-device recovery screen, idle STOP, both actual batch wrappers and a
+missing-runtime bootstrap error under a path containing spaces and Chinese.
 
 Examples:
 

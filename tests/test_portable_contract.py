@@ -42,17 +42,16 @@ def test_portable_manifest_matches_the_launcher_directory_contract():
         "runtime/scrcpy/AdbWinApi.dll",
         "runtime/scrcpy/AdbWinUsbApi.dll",
     ]
-    assert "discover-device --adb-path" in start
-    assert "probe --serial" in start
-    assert "--package" in start
-    assert "foreground-package.json" in start
-    assert "--capture scrcpy" in start
-    assert "--full-auto" in start
-    assert "--max-rounds" in start
+    assert '"%MVP_EXE%" portable-start' in start
+    assert '"%MVP_EXE%" portable-stop' in stop
+    for launcher in (start, stop):
+        assert "pause >nul" in launcher
+        assert "exit /b %LAUNCH_EXIT%" in launcher
+        assert "Start-Process" not in launcher
+        assert "taskkill" not in launcher
     assert "chcp 65001" in start
     assert "PYTHONIOENCODING=utf-8" in start
     assert "chcp 65001" in stop
-    assert "foreground-package.json" in stop
 
 
 def test_windows_constraints_and_manifest_record_the_resolved_build_set():

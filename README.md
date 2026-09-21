@@ -33,9 +33,9 @@ brew install scrcpy
 python -m pip install -e '.[dev,scrcpy]'
 ```
 
-### Windows x64 portable 前置版
+### Windows x64 portable
 
-Issue #3 的分發前置作業已加入 PyInstaller onedir build、裝置安全偵測與
+Windows 分發包含 PyInstaller onedir build、裝置安全偵測與
 GitHub Actions。Windows 機器可在 PowerShell 執行：
 
 ```powershell
@@ -44,12 +44,15 @@ GitHub Actions。Windows 機器可在 PowerShell 執行：
 
 輸出會包含根目錄 `START.bat`／`STOP.bat`、`config\default.yaml`、可選的
 `config\user.yaml`，以及 `runtime\FishingMVP.exe` 與 pinned scrcpy v4.1
-官方檔案。雙擊 `START.bat` 後輸入 1–999 輪；它只會在偵測到恰好一台已授權
+官方檔案。雙擊 `START.bat` 後輸入 1–999 輪（Enter 預設 1 輪）；它只會在偵測到恰好一台已授權
 裝置、且能辨識目前前景 package 時啟動，並強制使用 scrcpy，不會靜默 fallback
 到 ADB screenshot。啟動前也會把 package 傳入 live runner，持續做前景安全檢查。
 Windows build 使用 `packaging/constraints-windows.txt` 固定 app/native 依賴，
 並由 frozen `FishingMVP.exe runtime-smoke` 實際驗證 packaged config 與 PyAV
 H.264 decoder；只有 `main` 的手動 dispatch 或 `v*` tag push 會發布 Release。
+啟動、中文階段／輪數進度與結果留在同一個視窗，錯誤可修正後重試。
+`STOP.bat` 會要求程式停止新的輸入並保存紀錄；完成後按鍵才關閉視窗。
+每次執行與重試紀錄分別保存在 `run/sessions/日期時間-編號/`，不覆蓋舊紀錄。
 完整流程與限制請見 [`packaging/README.md`](packaging/README.md) 與
 [`portable/使用說明.txt`](portable/使用說明.txt)。
 
@@ -174,6 +177,7 @@ scrcpy 是可選的外部擷取來源：`probe` 會顯示是否可用；使用 `
 
 scrcpy 模式會從與桌面 binary 同版本的 scrcpy-server 接收 H.264 影像，PyAV 只負責在本機解碼成 OpenCV frame；不會開啟 scrcpy 視窗，也不會在手機安裝常駐 App。預設保留原生影像尺寸，避免把 normalized 偵測座標映射到錯誤的 framebuffer。
 scrcpy 影像是畫面變更驅動的；靜止 UI 會重用最新幀，避免等待畫面因沒有新封包而誤判 timeout。若裝置解析度／方向和串流不相容，live runner 會在送出前停止。
+QTE 速度估算優先使用來源影格 PTS，沒有 PTS 時使用解碼時間，再退回分析時間；來源或時間基準改變時會重設歷史。重複影格不加入速度樣本，也不觸發新的 QTE 點擊，待新影格到達才恢復判斷。靜止的等待畫面仍可重用。
 scrcpy live session 同時建立 video 與 control socket；TAP 會傳送 scrcpy 4.1 的 DOWN／UP control event，不再為每次點擊啟動 `adb shell input tap` subprocess。若 scrcpy／control socket 無法建立，`auto` 會整體回退到 ADB screenshot 與 ADB input，兩種來源的延遲樣本不會混用；`scrcpy` 強制模式則會直接報錯。live 的 `live_detections.jsonl` 與 `live_summary.json` 會記錄 video PTS、封包到達／解碼時間、frame age、CV 分析時間、control dispatch 時間，以及下一個影格／離開 QTE 的觀測延遲。
 macOS 的 OpenCV 與 PyAV wheel 可能各自攜帶 FFmpeg，啟動時會出現 AVFoundation duplicate-class 警告；本機實測串流仍穩定，若遇到解碼不穩可先改用 `--capture adb`。
 
@@ -186,9 +190,14 @@ python -m fishing_mvp runtime-smoke
 它只載入 packaged `default.yaml`，並在目前 executable 的 Python runtime 中建立
 H.264 decoder；失敗時回傳 exit code 2，不會嘗試連線或操作 Android 裝置。
 
+Live 模式先送出動作，再產生狀態切換截圖；截圖失敗會記錄警告並繼續。連線、前景、解析度或輸入錯誤仍會停止，先保存 `live_summary.json` 的 `error`、`last_state` 與 `completed_rounds`，再回傳失敗；若儲存空間本身無法寫入，會在終端報告摘要寫入失敗。摘要以暫存檔替換，避免留下半份 JSON。
+QTE 的後續影格觀測只接受輸入送出後解碼的新影格，延遲從 dispatch 結束時計算。待處理觀測在離開 QTE／QUALITY 時完成並移除，超過 `qte_timeout_s` 與 `quality_timeout_s` 中較大的值則標記 `timed_out` 並移除；歷史結果仍保留在 actions 摘要中。
+
 ## 設定
 
 預設設定在 [`config/default.yaml`](config/default.yaml)。設定的是 HSV／幾何／時序閾值，不是畫面上的絕對點擊位置。可複製後用 `--config` 指定：
+
+啟動前會嚴格驗證合併後的設定：未知欄位、錯誤型別、非有限數值、無效範圍或顛倒的上下限都會直接報錯並指出欄位。布林值請使用 YAML 的 `true`／`false`，數值不要加引號；FPS 至少為 0.5，比例介於 0 到 1。`--fps`／`--qte-fps` 也適用相同驗證。既有設定若含拼字錯誤或未使用的欄位，需先修正才能啟動。
 
 ```bash
 python -m fishing_mvp analyze-video \

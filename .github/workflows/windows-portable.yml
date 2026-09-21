@@ -243,6 +243,12 @@ jobs:
             throw 'PyAV files were not found in the frozen portable package'
           }
 
+      - name: Smoke-test frozen operator console and batch launchers
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.package_root }}
+        run: python packaging/smoke_portable_ui.py "$env:PACKAGE_ROOT"
+
       - name: Zip portable package
         id: archive
         shell: pwsh
