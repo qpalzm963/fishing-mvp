@@ -114,6 +114,10 @@ class AutomationConfig:
     # Foreground checks are intentionally periodic: a dumpsys call before
     # every QTE tap adds avoidable input latency.
     foreground_check_interval_s: float = 0.75
+    auto_retry_enabled: bool = False
+    max_retry_attempts: int = 3
+    retry_delay_ms: int = 1000
+    retry_recovery_timeout_s: float = 8.0
 
 
 @dataclass

@@ -81,10 +81,15 @@ action:
   result_max_attempts: 3
 
 automation:
+  # Session-wide retry budget; recovery never sends input.
+  auto_retry_enabled: false
+  max_retry_attempts: 3
+  retry_delay_ms: 1000
+  retry_recovery_timeout_s: 8.0
   # Full-auto stops instead of waiting forever when a stage is not recognised.
   unknown_timeout_s: 8.0
   waiting_timeout_s: 30.0
-  # A round that returned to waiting without RESULT is not allowed to restart.
+  # With auto retry disabled, an unconfirmed round waits this long before stopping.
   unconfirmed_waiting_timeout_s: 8.0
   prompt_timeout_s: 12.0
   casting_timeout_s: 12.0

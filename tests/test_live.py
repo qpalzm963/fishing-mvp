@@ -92,6 +92,149 @@ def run(session, output, **kwargs):
                          send_actions=True, qte_enabled=True, **kwargs)
 
 
+def test_live_retry_after_narrow_qte_miss_then_success(session, tmp_path):
+    session.config.automation.auto_retry_enabled = True
+    session.config.automation.retry_delay_ms = 500
+    session.frames.extend([
+        detection(FishingState.WAITING),
+        replace(detection(), gauge_target_range=(0.499, 0.501)),
+        detection(FishingState.WAITING),
+        *[detection(FishingState.WAITING) for _ in range(12)],
+        detection(), detection(FishingState.QUALITY),
+        detection(FishingState.RESULT), detection(FishingState.WAITING),
+    ])
+    summary = run(session, tmp_path, full_auto=True)
+    assert summary["stop_reason"] == "completed_rounds"
+    assert summary["completed_rounds"] == 1
+    assert summary["retry"]["retry_attempts"] == 1
+    events = summary["retry"]["events"]
+    assert [event["decision"] for event in events] == ["wait_for_recovery", "retry_started", "success"]
+    assert events[0]["failure_reason"] == "qte_miss"
+    assert events[-1]["after_retry"]
+    assert events[1]["timestamp_s"] - events[0]["timestamp_s"] >= 0.5
+    starts = [action for action in summary["actions"] if "waiting/start" in action["reason"]]
+    assert len(starts) == 2
+    assert [action["attempt"] for action in starts] == [1, 2]
+    assert not any(events[0]["timestamp_s"] <= action["timestamp_s"] < events[1]["timestamp_s"]
+                   for action in summary["actions"])
+    records = [json.loads(line) for line in (tmp_path / "live_detections.jsonl").read_text().splitlines()]
+    assert all(record["action"] is None for record in records if record["recovering"])
+
+
+def test_live_retry_exhausts_session_budget(session, tmp_path):
+    session.config.automation.auto_retry_enabled = True
+    session.config.automation.retry_delay_ms = 0
+    session.frames.extend([detection(state) for _ in range(4) for state in
+                           (FishingState.QTE, FishingState.WAITING, FishingState.WAITING)])
+    summary = run(session, tmp_path, full_auto=True)
+    assert summary["stop_reason"] == "max_retry_attempts"
+    assert summary["completed_rounds"] == 0
+    assert summary["retry"]["retry_attempts"] == 3
+    assert summary["retry"]["attempt"] == 4
+    assert len([a for a in summary["actions"] if "waiting/start" in a["reason"]]) == 3
+
+
+@pytest.mark.parametrize("error", [RuntimeError("capture lost"), PermissionError("permission denied"), ADBError("disconnected")])
+def test_live_retry_does_not_swallow_fatal_errors(session, tmp_path, error):
+    session.config.automation.auto_retry_enabled = True
+    session.frames.extend([detection(), detection(FishingState.WAITING), error])
+    with pytest.raises(RuntimeError):
+        run(session, tmp_path, full_auto=True)
+    summary = json.loads((tmp_path / "live_summary.json").read_text())
+    assert summary["stop_reason"] == "error"
+    assert summary["retry"]["retry_attempts"] == 0
+    assert summary["error"]["message"] == str(error)
+    assert summary["retry"]["events"][-1]["decision"] == "session_stopped"
+    assert session.source.closed
+
+
+def test_live_stop_during_recovery_sends_no_new_input(session, tmp_path):
+    session.config.automation.auto_retry_enabled = True
+    session.frames.extend([detection(), detection(FishingState.WAITING), detection(FishingState.WAITING)])
+    summary = run(session, tmp_path, full_auto=True,
+                  stop_requested=lambda: len(session.frames) <= 1)
+    assert summary["stop_reason"] == "user_stop"
+    assert summary["retry"]["retry_attempts"] == 0
+    assert len(summary["actions"]) == 1
+
+
+def test_live_recovery_timeout_never_blindly_taps_result(session, tmp_path):
+    session.config.automation.auto_retry_enabled = True
+    session.config.automation.retry_recovery_timeout_s = 0.3
+    session.frames.extend([detection(), detection(FishingState.WAITING),
+                           *[replace(detection(FishingState.RESULT), continue_box=Box(1, 1, 20, 10)) for _ in range(10)]])
+    summary = run(session, tmp_path, full_auto=True)
+    assert summary["stop_reason"] == "retry_recovery_timeout"
+    assert summary["completed_rounds"] == 0
+    assert len(summary["actions"]) == 1
+
+
+def test_live_retry_resets_temporal_runtime_and_cancels_old_observations(session, tmp_path, monkeypatch):
+    session.config.automation.auto_retry_enabled = True
+    session.config.automation.retry_delay_ms = 0
+    session.config.automation.qte_timeout_s = 0.05
+    session.config.automation.quality_timeout_s = 0.05
+    analyzers, machines, planners = [], [], []
+    for name, instances in (("FrameAnalyzer", analyzers), ("FishingStateMachine", machines), ("ActionPlanner", planners)):
+        original = getattr(live, name)
+        def factory(config, original=original, instances=instances):
+            instance = original(config)
+            instances.append(instance)
+            return instance
+        monkeypatch.setattr(live, name, factory)
+    session.frames.extend([detection(), detection(), detection(),
+                           detection(FishingState.WAITING), detection(),
+                           detection(FishingState.RESULT), detection(FishingState.WAITING)])
+    summary = run(session, tmp_path, full_auto=True)
+    assert summary["stop_reason"] == "completed_rounds"
+    assert len(analyzers) == len(machines) == len(planners) == 2
+    qte_actions = [a for a in summary["actions"] if "target" in a["reason"]]
+    assert len(qte_actions) == 2
+    assert qte_actions[0]["observation_status"] == "attempt_failed"
+    assert qte_actions[0].get("state_transition_observed_s") is None
+    assert qte_actions[1]["attempt"] == 2
+
+
+def test_retry_dry_run_never_dispatches(session, tmp_path):
+    session.config.automation.auto_retry_enabled = True
+    session.config.automation.retry_delay_ms = 0
+    session.frames.extend([detection(), detection(FishingState.WAITING), detection(FishingState.WAITING),
+                           detection(FishingState.RESULT), detection(FishingState.WAITING)])
+    summary = live.run_live("phone", "game", session.config, tmp_path, full_auto=True)
+    assert summary["retry"]["retry_attempts"] == 1
+    assert summary["stop_reason"] == "completed_rounds"
+    assert "send" not in session.events
+    assert all(not action["sent"] for action in summary["actions"])
+
+
+def test_retry_config_does_not_enable_automation_in_manual_live(session, tmp_path):
+    session.config.automation.auto_retry_enabled = True
+    session.frames.extend([detection(), detection(FishingState.WAITING)])
+    summary = run(session, tmp_path)
+    assert summary["retry"] is None
+    assert summary["stop_reason"] == "keyboard_interrupt"
+
+
+@pytest.mark.parametrize("failure_point", ["startup", "input"])
+def test_auto_retry_never_reinitializes_a_failed_backend(session, tmp_path, monkeypatch, failure_point):
+    session.config.automation.auto_retry_enabled = True
+    session.frames.append(detection())
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(failure_point)
+        raise RuntimeError(f"{failure_point} failed")
+    if failure_point == "startup":
+        monkeypatch.setattr(live, "create_live_frame_source", fail)
+    else:
+        monkeypatch.setattr(session.source, "send_action", fail)
+    with pytest.raises(RuntimeError, match=f"{failure_point} failed"):
+        run(session, tmp_path, full_auto=True)
+    assert calls == [failure_point]
+    summary = json.loads((tmp_path / "live_summary.json").read_text())
+    assert summary["stop_reason"] == "error"
+    assert summary["retry"]["retry_attempts"] == 0
+
+
 def test_live_sends_before_snapshot_and_survives_snapshot_failure(session, tmp_path, monkeypatch, caplog):
     session.frames.append(detection())
 

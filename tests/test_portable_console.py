@@ -65,6 +65,22 @@ def test_console_runs_in_same_output_with_human_progress_and_saved_diagnostics(p
     assert not (paths.root / "run/session.json").exists()
 
 
+def test_console_passes_retry_user_config_to_same_full_auto_session(portable):
+    paths, calls = portable
+    paths.user_config.write_text(
+        "automation:\n  auto_retry_enabled: true\n  max_retry_attempts: 2\n"
+        "  retry_delay_ms: 500\n  retry_recovery_timeout_s: 6\n"
+    )
+    assert ui.start_console(paths, read_input=reader("3"), output=io.StringIO()) == 0
+    assert len(calls) == 1
+    assert calls[0]["max_rounds"] == 3
+    config = calls[0]["config"].automation
+    assert config.auto_retry_enabled
+    assert config.max_retry_attempts == 2
+    assert config.retry_delay_ms == 500
+    assert config.retry_recovery_timeout_s == 6
+
+
 def test_console_retries_discovery_and_rechecks_device(portable, monkeypatch):
     paths, calls = portable
     devices = iter([None, "phone-2"])

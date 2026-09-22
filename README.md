@@ -169,7 +169,29 @@ python -m fishing_mvp live \
   --output-dir outputs/live_full_auto
 ```
 
-`--full-auto` 會自動開啟開始、QTE 與結果流程；`--max-rounds N` 預設為 1，完成 N 次「看過 `RESULT` 後回到 `WAITING`」後停止。若未加 `--live`，即使使用 `--full-auto` 也只會產生動作提案。當狀態長時間無法辨識或某個階段超時，程式會安全停止並在 `live_summary.json` 記錄 `stop_reason`，不會盲點。
+`--full-auto` 會自動開啟開始、QTE 與結果流程；`--max-rounds N` 預設為 1，完成 N 次「看過 `RESULT` 後回到 `WAITING`」後停止。若未加 `--live`，即使使用 `--full-auto` 也只會產生動作提案。預設在狀態長時間無法辨識或某個階段超時時安全停止，並在 `live_summary.json` 記錄 `stop_reason`。
+
+### 失敗後自動重試
+
+Auto Retry 預設關閉。CLI 的 `--config` 或 Windows portable 的 `config/user.yaml` 可加入：
+
+```yaml
+automation:
+  auto_retry_enabled: true
+  max_retry_attempts: 3
+  retry_delay_ms: 1000
+  retry_recovery_timeout_s: 8.0
+```
+
+只適用於 `live --full-auto`（包含 portable）；dry-run 只記錄決策與動作提案。`max_retry_attempts` 是整次執行共用的額外重試額度，成功一輪不補回額度；設為 0 即不重試。失敗不計入完成輪數，重試保留既有成功輪數，因此 N 輪最多有 N + 3 次嘗試。次數及毫秒間隔必須是非負整數，復原等待秒數必須是有限、非負數值。
+
+QTE／QUALITY 未經 RESULT 就穩定回到 WAITING，或整段 QTE 超時，會標記 `qte_miss`。單次 tap 未見成功不立即結束整輪，仍保留原有下一次掃掠的補救。其他活動階段未經 RESULT 回到 WAITING，或已知階段超時，也可進入有限的復原等待；短暫按鈕／gauge 遺失不會立即重試。
+
+復原期間不送出任何輸入，也不計入遲到的結算。系統清除 detector、狀態機、QTE marker／target／velocity、pending observation、cooldown、re-arm 與延遲樣本。只有失敗後取得的畫面能確認 WAITING；信心須達原有門檻、開始按鈕可辨識、沒有 prompt／gauge，並連續符合 `stable_frames`，才能在重試間隔屆滿後重新開始。靜止 scrcpy 畫面可重用失敗後解碼的影格，失敗前的影格不能啟動重試。
+
+復原等待從判定失敗時計算，包含 retry delay；`retry_recovery_timeout_s` 應大於 `retry_delay_ms / 1000` 並留出辨識時間，否則會先逾時停止。等待超時記錄 `retry_recovery_timeout`，額度用盡記錄 `max_retry_attempts`。UNKNOWN 超時、ERROR、擷取／連線／權限／輸入錯誤仍停止；STOP／Ctrl+C／執行時間上限也不會觸發重試。
+
+關閉 Auto Retry 時，保留既有停止時機（包含未經 RESULT 返回 WAITING 後的 8 秒等待），只增加診斷。`live_detections.jsonl` 的 `retry_events`、`live_summary.json` 的 `retry.events` 與 `[Retry]` log 記錄 attempt、失敗原因、QTE miss 原因、額度、間隔、復原決策及重試後是否成功。Portable 的 log 保存在同次執行的 `diagnostics.log`，自動重試不建立新 session；畫面上的手動重試仍會開始一組新的指定輪數。離線影片分析不執行整輪重試。
 
 部分金色魚／獎勵動畫在第一次按下動態偵測到的繼續或關閉控制後，還需要再確認一次。若 `RESULT` 仍維持，full-auto 會等待 `result_extra_tap_delay_s`，重新偵測當下的繼續／關閉控制並優先點擊它；只有沒有明確控制時，才會使用通過輪廓驗證的中央結果覆蓋層候選。總嘗試次數受 `result_max_attempts` 限制，且只有畫面仍被辨識為結果覆蓋層時才會重試；狀態離開 `RESULT` 後立即停止點擊，避免誤觸釣魚畫面。
 
@@ -182,7 +204,7 @@ python -m fishing_mvp live \
 - `--enable-qte` 採即時單擊事件模型；QTE 速度預測、ETA、輸入延遲、點擊間隔與按壓時間可在 YAML 調整。窄目標的 `gauge_target_min_color_pixels`、`gauge_target_min_width_ratio`、`gauge_target_min_width_px` 與 `gauge_target_min_column_coverage` 控制偵測下限；`gauge_marker_max_width_ratio` 避免背景紅色元素被當成 marker 寬度；`gauge_full_res_refine_enabled` 與 `gauge_full_res_refine_padding_ratio` 控制原始解析度 ROI refine；`gauge_target_tracking_frames`、`gauge_target_tracking_max_width_ratio`、`gauge_target_tracking_max_gap_ratio` 與 `gauge_target_tracking_missing_frames` 控制收縮／放大證據與短暫遮蔽 recovery。`qte_eta_enabled` 預設開啟，`qte_boundary_mode` 可選 `auto`、`reflection` 或 `clip`；預測點擊未觀察到實際入框時，會在 `qte_prediction_grace_s` 後重新武裝，保留後續掃掠的補救機會。
 - `result_extra_tap_enabled`、`result_extra_tap_delay_s` 與 `result_max_attempts` 控制結算控制的有限重試；每次位置都由當前畫面的控制或結果輪廓動態產生，且不使用固定座標。
 - `--full-auto` 只會操作已在前景且符合 `--package` 的遊戲；它不會替使用者切換 App。
-- 完整自動化的各階段 timeout 在 `config/default.yaml` 的 `automation` 區段設定；超時會停止，不會改用固定座標猜測。
+- 完整自動化的各階段 timeout 在 `config/default.yaml` 的 `automation` 區段設定；預設超時會停止，啟用 Auto Retry 後也只在確認可開始的穩定畫面重試。
 
 預設 detector 在等待／提示／結算階段取樣 10 FPS，在 QTE／QUALITY 階段動態提升到 30 FPS；可用 `--fps` 與 `--qte-fps` 或 YAML 的 `capture_fps`／`qte_capture_fps` 調整。Gauge 工作影像寬度預設為 480，marker／target 只在映射後的原始 gauge ROI refine；輸出的 normalized 座標仍會還原到原始 framebuffer。QTE 事件冷卻預設 0.18 秒，ETA horizon 會加總 frame age、CV 分析、來源分開的 dispatch latency 與 tap hold；尚未有實測樣本時才使用 `qte_input_latency_s` 初始值。預設以 `input tap`（0ms hold）降低 Android 端落後。
 
