@@ -14,6 +14,7 @@ from .capture import LiveFrameSource, create_live_frame_source, scrcpy_status
 from .config import AppConfig, validate_config
 from .debug import draw_overlay, save_snapshot
 from .models import Action, Detection, FishingState, FrameMetadata, StateTransition
+from .retry import AttemptRecovery
 from .state_machine import ActionPlanner, AutomationProgress, FishingStateMachine
 from .vision import FrameAnalyzer
 
@@ -209,6 +210,7 @@ def run_live(
     planner = ActionPlanner(config.action)
     target_rounds = (max_rounds or 1) if full_auto else None
     automation = AutomationProgress(max_rounds=target_rounds or 1) if full_auto else None
+    recovery = AttemptRecovery(config, automation) if automation is not None else None
     start = time.monotonic()
     next_frame = start
     sampling_state = FishingState.UNKNOWN
@@ -288,7 +290,8 @@ def run_live(
                         frame,
                         frame_index,
                         timestamp_s,
-                        fast=sampling_state in {FishingState.QTE, FishingState.QUALITY},
+                        fast=sampling_state in {FishingState.QTE, FishingState.QUALITY}
+                        and not (recovery is not None and recovery.recovering),
                     )
                     analysis_finished_at = time.monotonic()
                     _annotate_frame_timing(
@@ -300,15 +303,24 @@ def run_live(
                     )
                     state, transition = machine.update(detection)
                     sampling_state = state
+                    retry_event_start = len(recovery.events) if recovery is not None else 0
+                    if recovery is not None and recovery.update(detection, state, transition):
+                        # Dispatch is synchronous: pending entries are observations,
+                        # not queued input. Mark them before discarding old runtime.
+                        for pending in pending_qte_actions:
+                            pending["observation_status"] = "attempt_failed"
+                        pending_qte_actions.clear()
+                        analyzer = FrameAnalyzer(config.detector)
+                        machine = FishingStateMachine(config.state_machine)
+                        planner = ActionPlanner(config.action)
                     qte_observations = _observe_qte_actions(
                         pending_qte_actions, detection, transition,
                         timeout_s=max(config.automation.qte_timeout_s, config.automation.quality_timeout_s),
                     )
-                    if automation is not None:
-                        automation.observe(state, timestamp_s, transition)
-                        if automation.timed_out(timestamp_s, config.automation):
-                            automation.stop_reason = f"state_timeout:{state.value}"
-                    action = None if automation is not None and automation.stop_reason is not None else planner.plan(
+                    blocked = automation is not None and (
+                        automation.stop_reason is not None or (recovery is not None and recovery.recovering)
+                    )
+                    action = None if blocked else planner.plan(
                         detection,
                         state,
                         transition,
@@ -328,6 +340,14 @@ def run_live(
                     }
                     if qte_observations:
                         record["qte_observations"] = qte_observations
+                    if recovery is not None:
+                        record["attempt"] = recovery.attempt
+                        record["recovering"] = recovery.recovering
+                        retry_events = recovery.events[retry_event_start:]
+                        if retry_events:
+                            record["retry_events"] = retry_events
+                            for event in retry_events:
+                                print("[Retry] " + json.dumps(event, ensure_ascii=False))
                     if transition is not None:
                         transition_dict = transition.to_dict()
                         transitions.append(transition_dict)
@@ -378,6 +398,7 @@ def run_live(
                             "sent": send_actions,
                             "sent_action": sent_action.to_dict() if send_actions else None,
                             "input_path": input_path,
+                            "attempt": recovery.attempt if recovery is not None else None,
                             "analysis_start_s": round(timestamp_s, 4),
                             "frame_pts_us": detection.frame_pts_us,
                             "frame_age_ms": round(detection.frame_age_s * 1000.0, 2) if detection.frame_age_s is not None else None,
@@ -435,6 +456,15 @@ def run_live(
     for pending in pending_qte_actions:
         pending["observation_status"] = "session_stopped"
     pending_qte_actions.clear()
+    if recovery is not None and stop_reason not in {None, "completed_rounds"}:
+        # Include infrastructure failures and user stops, even during startup
+        # or passive recovery. Exceptions still propagate after saving summary.
+        recovery.events.append({
+            "attempt": recovery.attempt, "retry_attempts": recovery.retries,
+            "decision": "session_stopped", "stop_reason": stop_reason,
+            "last_state": sampling_state.value, "error": error,
+            "recoverable": False,
+        })
     try:
         scrcpy_info = scrcpy_status(scrcpy_executable)
     except Exception as exc:
@@ -449,6 +479,7 @@ def run_live(
         "full_auto": full_auto,
         "max_rounds": target_rounds,
         "completed_rounds": automation.completed_rounds if automation is not None else 0,
+        "retry": recovery.summary() if recovery is not None else None,
         "stop_reason": stop_reason or (automation.stop_reason if automation is not None else None),
         "error": error,
         "last_state": sampling_state.value,
@@ -469,7 +500,7 @@ def run_live(
             "Live runner stops on ADB errors, foreground changes, or screen-size changes.",
             "Foreground package checks are periodic so they do not block every QTE input.",
             "Full-auto remains dry-run unless --live is explicitly supplied.",
-            "Full-auto stops after the configured number of RESULT-seen then WAITING round completions or a stage timeout.",
+            "Full-auto counts RESULT-seen then WAITING completions; optional bounded recovery requires a stable start screen.",
             *([fallback_note] if fallback_note else []),
         ],
     }

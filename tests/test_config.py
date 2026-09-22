@@ -54,6 +54,14 @@ def test_load_config_without_files_keeps_dataclass_defaults():
     ("detector:\n  purple_hue_high: 180", "detector.purple_hue_high"),
     ("detector:\n  button_min_y_ratio: 0.95", "detector.button_min_y_ratio"),
     ("detector:\n  prompt_min_aspect: 20", "detector.prompt_min_aspect"),
+    ('automation:\n  auto_retry_enabled: "false"', "automation.auto_retry_enabled"),
+    ("automation:\n  max_retry_attempts: true", "automation.max_retry_attempts"),
+    ("automation:\n  max_retry_attempts: -1", "automation.max_retry_attempts"),
+    ("automation:\n  max_retry_attempts: 1.5", "automation.max_retry_attempts"),
+    ("automation:\n  retry_delay_ms: -1", "automation.retry_delay_ms"),
+    ("automation:\n  retry_delay_ms: 1.5", "automation.retry_delay_ms"),
+    ("automation:\n  retry_recovery_timeout_s: .inf", "automation.retry_recovery_timeout_s"),
+    ("automation:\n  retry_recovery_timeout_s: -1", "automation.retry_recovery_timeout_s"),
 ])
 def test_invalid_config_reports_field(tmp_path, text, field):
     path = tmp_path / "invalid.yaml"
@@ -82,6 +90,20 @@ def test_packaged_defaults_pass_strict_validation():
     assert load_config(root / "config/default.yaml").to_dict() == load_config(
         root / "src/fishing_mvp/defaults/default.yaml"
     ).to_dict()
+
+
+def test_retry_user_override_preserves_safe_defaults(tmp_path):
+    defaults = load_config()
+    assert not defaults.automation.auto_retry_enabled
+    assert defaults.automation.max_retry_attempts == 3
+    assert defaults.automation.retry_delay_ms == 1000
+    assert defaults.automation.retry_recovery_timeout_s == 8.0
+    path = tmp_path / "user.yaml"
+    path.write_text("automation:\n  auto_retry_enabled: true\n  max_retry_attempts: 2\n  retry_delay_ms: 500\n")
+    config = load_config(path, base_path=Path(__file__).resolve().parents[1] / "src/fishing_mvp/defaults/default.yaml")
+    assert config.automation.auto_retry_enabled
+    assert config.automation.max_retry_attempts == 2
+    assert config.automation.retry_delay_ms == 500
 
 
 @pytest.mark.parametrize("mode", ["auto", "reflection", "clip"])

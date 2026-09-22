@@ -35,9 +35,25 @@ Fishing MVP｜自動釣魚（Windows x64）
 重試會重新檢查手機，並開始一組新的指定輪數，不會接續未完成輪數。
 同一資料夾只允許一個啟動視窗，請不要重複雙擊。
 
+自動重試（預設關閉）
+--------------------
+若希望 QTE 失敗後自動再試，可在 config\user.yaml 加入：
+
+automation:
+  auto_retry_enabled: true
+  max_retry_attempts: 3
+  retry_delay_ms: 1000
+  retry_recovery_timeout_s: 8.0
+
+整次執行最多額外重試 3 次，成功不補回額度；失敗不計入完成輪數。
+每次失敗後至少間隔 1 秒，最多等待 8 秒確認可開始的畫面；等待期間不點擊。
+請讓等待上限大於重試間隔，並預留辨識時間。無法復原或連線異常會停止。
+自動重試沿用同次執行的紀錄、接續剩餘輪數；STOP.bat 與 Ctrl+C 仍可停止。
+若已有 automation 區段，將以上設定合併到該區段，不要重複建立。
+
 紀錄在哪裡
 ----------
-每次執行或重試都有獨立資料夾：run\sessions\日期時間-編號\
+每次執行或手動重試都有獨立資料夾：run\sessions\日期時間-編號\
 結果畫面會顯示完整位置。需要回報問題時，提供該資料夾的
  diagnostics.log 與 live_summary.json（若有）。
 請保留整個 runtime、config 資料夾；一般使用不必修改設定。

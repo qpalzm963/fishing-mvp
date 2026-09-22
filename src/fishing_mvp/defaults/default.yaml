@@ -68,6 +68,11 @@ action:
   result_max_attempts: 3
 
 automation:
+  # Session-wide retry budget; recovery never sends input.
+  auto_retry_enabled: false
+  max_retry_attempts: 3
+  retry_delay_ms: 1000
+  retry_recovery_timeout_s: 8.0
   unknown_timeout_s: 8.0
   waiting_timeout_s: 30.0
   unconfirmed_waiting_timeout_s: 8.0
