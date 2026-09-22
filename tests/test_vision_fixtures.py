@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from fishing_mvp.config import DetectorConfig
 from fishing_mvp.models import Box, FishingState
@@ -163,6 +164,58 @@ def test_quality_fixture_detects_quality_label_without_ocr():
     assert detection.hint == FishingState.QUALITY
     assert detection.quality in {"cool", "great", "perfect"}
     assert detection.gauge_box is not None
+
+
+@pytest.mark.parametrize("name", ["qte_splash_16s", "qte_splash_20s", "qte_splash_21s"])
+@pytest.mark.parametrize("width", [540, 1080])
+def test_late_qte_water_splashes_do_not_suppress_input_as_cool(name, width):
+    frame = cv2.resize(load_fixture(name), (width, width * 2340 // 1080))
+    detection = FrameAnalyzer(DetectorConfig()).analyze(frame, 0, 0.0)
+    assert detection.hint == FishingState.QTE
+    assert detection.quality is None
+    assert detection.gauge_marker_x is not None
+    assert detection.gauge_target_range is not None
+
+
+@pytest.mark.parametrize("width", [540, 1080])
+def test_real_cool_letters_are_still_recognized(width):
+    frame = cv2.resize(load_fixture("cool_20260921"), (width, width * 2340 // 1080))
+    detection = FrameAnalyzer(DetectorConfig()).analyze(frame, 0, 0.0)
+    assert detection.hint == FishingState.QUALITY
+    assert detection.quality == "cool"
+
+
+@pytest.mark.parametrize("visible,marker", [((0.50, 0.54), 0.46), ((0.44, 0.48), 0.52)])
+def test_partial_marker_occlusion_keeps_target_center_with_bounded_recovery(visible, marker):
+    analyzer = FrameAnalyzer(DetectorConfig(gauge_target_tracking_missing_frames=2))
+    gauge = Box(100, 500, 300, 40)
+    target = (0.44, 0.54)
+    assert analyzer._stabilize_target_range(gauge, target, 0.08, 0.2) == target
+    for _ in range(2):
+        assert analyzer._stabilize_target_range(gauge, visible, 0.08, marker) == target
+        assert analyzer.target_marker_occluded
+    # Ambiguous evidence cannot retain an old target indefinitely.
+    assert analyzer._stabilize_target_range(gauge, visible, 0.08, marker) == visible
+
+
+def test_partial_occlusion_recovery_does_not_hide_real_shrink_or_target_move():
+    analyzer = FrameAnalyzer(DetectorConfig())
+    gauge = Box(100, 500, 300, 40)
+    analyzer._stabilize_target_range(gauge, (0.44, 0.54), 0.08, 0.2)
+    assert analyzer._stabilize_target_range(gauge, (0.50, 0.54), 0.08, 0.46) == (0.44, 0.54)
+    assert analyzer._stabilize_target_range(gauge, (0.47, 0.51), 0.08, 0.2) == (0.47, 0.51)
+    assert analyzer._stabilize_target_range(gauge, (0.64, 0.68), 0.08, 0.5) == (0.64, 0.68)
+
+
+def test_recorded_marker_outline_does_not_shift_the_target_at_16_seconds():
+    analyzer = FrameAnalyzer(DetectorConfig())
+    gauge = Box(100, 500, 300, 40)
+    target = (0.4386, 0.5273)
+    analyzer._stabilize_target_range(gauge, target, 0.0767, 0.5973)
+    # 16.775s and 16.808s: the white outline extends beyond the red core.
+    assert analyzer._stabilize_target_range(gauge, (0.4352, 0.4795), 0.0767, 0.5358) == target
+    assert analyzer._stabilize_target_range(gauge, (0.4334, 0.4642), 0.0767, 0.5154) == target
+    assert analyzer._stabilize_target_range(gauge, None, 0.0767, 0.4966) == target
 
 
 def test_result_fixture_uses_normalized_yellow_ratio_and_detects_bottom_dismiss_icon():

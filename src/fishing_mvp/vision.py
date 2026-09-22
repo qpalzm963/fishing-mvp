@@ -623,6 +623,12 @@ def detect_quality(
         cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         pixel_count, largest = _compact_component_pixels(cleaned)
         pixel_counts[name] = pixel_count
+        if name == "cool" and not _has_aligned_quality_letters(cleaned, radius):
+            # Blue splashes and isolated water highlights can exceed the
+            # colour threshold. Cool must also have horizontally aligned
+            # letter components (including the two enclosed o shapes).
+            scores[name] = (0.0, pixel_count)
+            continue
         density = pixel_count / max(1.0, roi.w * roi.h)
         compact = min(1.0, largest / max(1.0, roi.w * roi.h * 0.16))
         score = min(1.0, pixel_count / max(1.0, config.quality_min_pixels * 3.5)) * 0.70 + min(1.0, density / 0.035) * 0.30
@@ -632,6 +638,30 @@ def detect_quality(
     if best_pixels < config.quality_min_pixels or best_score < 0.22:
         return None, 0.0, pixel_counts
     return best_name, float(np.clip(best_score, 0.0, 1.0)), pixel_counts
+
+
+def _has_aligned_quality_letters(mask: np.ndarray, radius: float) -> bool:
+    height, width = mask.shape
+    _, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    letters = []
+    for x, y, w, h, area in stats[1:]:
+        if (
+            x <= 0 or y <= 0 or x + w >= width - 1 or y + h >= height - 1
+            or area > width * height * 0.18
+            or h < radius * 0.18 or w < radius * 0.08
+        ):
+            continue
+        letters.append((x, y, w, h))
+    for x, y, w, h in letters:
+        for other_x, other_y, other_w, other_h in letters:
+            if (
+                other_x >= x + w
+                and abs((y + h / 2) - (other_y + other_h / 2)) <= min(h, other_h) * 0.5
+                and other_x + other_w - x >= radius * 0.5
+                and other_x - (x + w) <= radius * 0.5
+            ):
+                return True
+    return False
 
 
 def detect_continue_button(frame: np.ndarray, result_visible: bool) -> Box | None:
@@ -854,7 +884,6 @@ class FrameAnalyzer:
             self.target_tracking_mode = "reset_target_missing"
             return None
 
-        self.target_range_missing_frames = 0
         self.target_marker_occluded = False
         low, high = sorted((float(target_range[0]), float(target_range[1])))
         current = (float(np.clip(low, 0.0, 1.0)), float(np.clip(high, 0.0, 1.0)))
@@ -866,6 +895,7 @@ class FrameAnalyzer:
 
         previous = self.tracked_target_range
         if previous is None:
+            self.target_range_missing_frames = 0
             self.target_range_history.append(current)
             self.tracked_target_range = current
             self.target_tracking_mode = "raw_initial"
@@ -879,6 +909,38 @@ class FrameAnalyzer:
         allowed_width = max(0.0, float(self.config.gauge_target_tracking_max_width_ratio))
         overlap = min(previous[1], current[1]) - max(previous[0], current[0])
         gap = max(0.0, max(previous[0], current[0]) - min(previous[1], current[1]))
+
+        # A marker covering one edge leaves a valid but incomplete yellow
+        # span. Treat that like a missing observation, not a real shrink.
+        # Require the other edge to stay put and all lost width to be under
+        # the marker; a moved target or an unobscured shrink still wins now.
+        if marker_x is not None and marker_width is not None and marker_width > 0:
+            tolerance = 0.01
+            # Width comes from the red core; its white/dark outline also
+            # hides yellow. This padding is only for occlusion recovery,
+            # never for enlarging the planner's accepted click range.
+            cover_half_width = marker_width * 0.75
+            cover_low = marker_x - cover_half_width - tolerance
+            cover_high = marker_x + cover_half_width + tolerance
+            left_hidden = (
+                current[0] > previous[0] + tolerance
+                and abs(current[1] - previous[1]) <= tolerance
+                and cover_low <= previous[0]
+                and cover_high >= current[0]
+            )
+            right_hidden = (
+                current[1] < previous[1] - tolerance
+                and abs(current[0] - previous[0]) <= tolerance
+                and cover_low <= current[1]
+                and cover_high >= previous[1]
+            )
+            if current_width < previous_width and (left_hidden or right_hidden):
+                self.target_range_missing_frames += 1
+                if self.target_range_missing_frames <= max(0, int(self.config.gauge_target_tracking_missing_frames)):
+                    self.target_marker_occluded = True
+                    self.target_tracking_mode = "recovery_partial_marker_occlusion"
+                    return previous
+        self.target_range_missing_frames = 0
 
         # Contraction is the important safety path: replace the old span
         # straight away and discard older envelope samples.

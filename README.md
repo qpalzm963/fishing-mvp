@@ -97,6 +97,8 @@ Issue #5 的窄目標流程分成三層：`gauge_raw_target_range` 是原始觀�
 
 Tracker 對 target 收縮採立即收斂，單一較寬觀測不會重新放大 safe range；放大需要受限的連續證據，marker 遮蔽／短暫缺失最多沿用 4 幀，gauge 跳變或缺失過久會 reset。ETA 使用 `target_center`、marker velocity，以及 `frame_age + analysis_duration + dispatch_latency + tap_hold`；timing window 隨 target 寬度縮放，並支援 `[0, 1]` 邊界反彈預測。`detections.jsonl` 的 `features.gauge_refine`、`features.qte` 會記錄 raw／tracked／safe range、marker、velocity、ETA、input ETA、timing window、boundary mode、reflection 與 tap reason。
 
+2026-09-21 錄影的後段 QTE 回歸另修正兩種誤判：Cool 除了藍色面積，還須有橫向排列的字形組件，避免水面特效觸發 QUALITY 而停按；指針僅遮住黃區一側時，若未遮住的邊緣仍一致，最多沿用 `gauge_target_tracking_missing_frames` 幀的完整目標。未被指針遮擋的收縮與目標移動仍立即更新。影片重播只驗證偵測與點擊提案，實機命中仍需以 live 執行確認。
+
 使用提供的影片驗證 Issue #5：
 
 ```bash
