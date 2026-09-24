@@ -164,11 +164,19 @@ def start_console(paths: PortablePaths, *, read_input=None, output: TextIO | Non
                     return 2
                 reason = summary.get("stop_reason") or "unknown"
                 completed = summary.get("completed_rounds", 0)
+                retry_summary = summary.get("retry") or {}
                 console.say()
                 if reason == "completed_rounds":
                     console.say(f"[完成] 已完成 {completed} / {rounds} 輪。")
                 elif reason in {"user_stop", "keyboard_interrupt"}:
                     console.say(f"[已停止] 已完成 {completed} / {rounds} 輪，執行紀錄已保存。")
+                elif reason == "start_unconfirmed" or (
+                    reason == "max_retry_attempts" and retry_summary.get("last_failure") == "start_unconfirmed"
+                ):
+                    console.say(f"[未完成] 已完成 {completed} / {rounds} 輪。開始點擊已送出，但畫面未進入釣魚流程。")
+                    if reason == "max_retry_attempts":
+                        console.say("自動重試額度已用完。")
+                    console.say("請確認遊戲停在釣魚畫面，再重新開始。")
                 else:
                     state = reason.partition(":")[2]
                     label = next((label for key, label in STATE_LABELS.items() if key.value == state), "目前階段")

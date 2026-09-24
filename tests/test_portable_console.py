@@ -144,6 +144,21 @@ def test_console_distinguishes_stopped_and_timed_out_from_completed(portable, mo
     assert "1 / 3" in output.getvalue()
 
 
+@pytest.mark.parametrize("reason", ["start_unconfirmed", "max_retry_attempts"])
+def test_console_explains_unconfirmed_start_even_after_retry_budget(portable, monkeypatch, reason):
+    paths, _ = portable
+    monkeypatch.setattr(ui, "run_live", lambda **kw: {
+        "stop_reason": reason, "completed_rounds": 0,
+        "retry": {"last_failure": "start_unconfirmed"},
+    })
+    output = io.StringIO()
+
+    assert ui.start_console(paths, read_input=reader("1", "q"), output=output) == 2
+    assert "開始點擊已送出，但畫面未進入釣魚流程" in output.getvalue()
+    if reason == "max_retry_attempts":
+        assert "自動重試額度已用完" in output.getvalue()
+
+
 def test_console_cancel_does_not_touch_device(portable):
     paths, calls = portable
     assert ui.start_console(paths, read_input=reader("q"), output=io.StringIO()) == 0

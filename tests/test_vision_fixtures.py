@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
+import fishing_mvp.vision as vision
 from fishing_mvp.config import DetectorConfig
 from fishing_mvp.models import Box, FishingState
 from fishing_mvp.vision import (
@@ -11,6 +12,7 @@ from fishing_mvp.vision import (
     _target_range_from_yellow,
     color_mask,
     detect_continue_button,
+    detect_quality,
     detect_result_fallback_tap,
     refine_gauge_roi,
 )
@@ -91,6 +93,82 @@ def test_gauge_refine_can_be_disabled_without_changing_work_frame_detection():
     assert detection.features["gauge_refine"]["attempted"] is False
     assert detection.features["gauge_refine"]["target_source"] == "work"
     assert detection.gauge_raw_target_range is not None
+
+
+def test_full_resolution_refine_failure_falls_back_to_work_frame(monkeypatch):
+    frame = load_fixture("qte")
+    baseline = FrameAnalyzer(DetectorConfig(gauge_full_res_refine_enabled=False)).analyze(frame, 0, 0.0)
+    monkeypatch.setattr(vision, "refine_gauge_roi", lambda *args: vision._GaugeRefinement(None, None, None, 0, 0))
+
+    detection = FrameAnalyzer(DetectorConfig()).analyze(frame, 0, 0.0)
+
+    assert detection.hint == FishingState.QTE
+    assert detection.gauge_marker_x == baseline.gauge_marker_x
+    assert detection.gauge_raw_target_range == baseline.gauge_raw_target_range
+    assert detection.features["gauge_refine"]["marker_source"] == "work"
+    assert detection.features["gauge_refine"]["target_source"] == "work"
+
+
+def test_narrow_target_is_recovered_from_full_resolution_when_work_target_is_missing(monkeypatch):
+    frame = np.zeros((2340, 1080, 3), dtype=np.uint8)
+    yellow = cv2.cvtColor(np.uint8([[[28, 220, 240]]]), cv2.COLOR_HSV2BGR)[0, 0].tolist()
+    red = cv2.cvtColor(np.uint8([[[4, 230, 240]]]), cv2.COLOR_HSV2BGR)[0, 0].tolist()
+    frame[1660:1700, 530:548] = yellow
+    frame[1650:1720, 650:660] = red
+    monkeypatch.setattr(vision, "detect_action_button", lambda *args: (Box(191, 822, 98, 98), True, 0.9, {}))
+    monkeypatch.setattr(vision, "detect_prompt", lambda *args: (None, 0.0))
+    monkeypatch.setattr(vision, "detect_gauge", lambda *args: (Box(111, 729, 258, 58), 0.9, None, None, None))
+
+    detection = FrameAnalyzer(DetectorConfig()).analyze(frame, 0, 0.0)
+
+    assert detection.hint == FishingState.QTE
+    assert detection.gauge_marker_x is not None
+    assert detection.gauge_raw_target_range is not None
+    assert detection.gauge_raw_target_range[1] - detection.gauge_raw_target_range[0] < 0.05
+    assert detection.features["gauge_refine"]["target_source"] == "full_res_roi"
+
+
+def test_empty_and_boundary_quality_roi_are_safe():
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    diagnostics: dict[str, object] = {}
+    result = detect_quality(frame, Box(40, 2, 8, 8), Box(35, 0, 18, 1), DetectorConfig(), diagnostics)
+    assert result == (None, 0.0, {})
+    assert diagnostics["status"] == "empty_roi"
+    assert diagnostics["roi_box"]["h"] == 0
+
+    diagnostics = {}
+    result = detect_quality(frame, Box(40, 40, 20, 20), Box(30, 10, 40, 10), DetectorConfig(), diagnostics)
+    assert result[0] is None
+    assert diagnostics["status"] == "analyzed"
+    assert diagnostics["roi_box"]["y"] == 0
+
+
+def test_analyze_skips_empty_quality_roi_without_crashing(monkeypatch):
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    monkeypatch.setattr(vision, "detect_action_button", lambda *args: (Box(40, 2, 8, 8), True, 0.9, {}))
+    monkeypatch.setattr(vision, "detect_prompt", lambda *args: (None, 0.0))
+    monkeypatch.setattr(vision, "detect_gauge", lambda *args: (Box(35, 0, 18, 1), 0.9, 0.5, 0.1, (0.4, 0.6)))
+
+    detection = FrameAnalyzer(DetectorConfig()).analyze(frame, 0, 0.0)
+
+    assert detection.quality is None
+    assert detection.features["quality_roi"]["status"] == "empty_roi"
+    assert detection.features["gauge_geometry"]["status"] == "accepted"
+
+
+def test_implausible_gauge_is_rejected_before_quality_analysis(monkeypatch):
+    frame = load_fixture("qte_splash_16s")
+    wrong_gauge = Box(100, 310, 260, 50)
+    monkeypatch.setattr(vision, "detect_gauge", lambda *args: (wrong_gauge, 0.95, 0.5, 0.05, (0.4, 0.6)))
+
+    detection = FrameAnalyzer(DetectorConfig()).analyze(frame, 0, 0.0)
+
+    assert detection.gauge_box is None
+    assert detection.quality is None
+    assert detection.features["gauge_geometry"]["status"] == "implausible_gauge_position"
+    assert detection.features["gauge_geometry"]["rejected_box_work"] == wrong_gauge.to_dict()
+    assert detection.features["gauge_geometry"]["rejected_box_frame"]["y"] > wrong_gauge.y
+    assert detection.features["quality_roi"]["status"] == "not_attempted"
 
 
 def test_narrow_yellow_target_is_accepted_but_sparse_noise_is_rejected():

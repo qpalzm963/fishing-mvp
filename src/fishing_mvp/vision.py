@@ -596,20 +596,54 @@ def refine_gauge_roi(
     return _GaugeRefinement(marker_x, marker_width, target_range, marker_pixels, target_pixels)
 
 
+def _gauge_geometry_issue(button: Box, gauge: Box, width: int, height: int) -> str | None:
+    if (
+        button.area == 0 or gauge.area == 0
+        or button.x < 0 or button.y < 0 or button.right > width or button.bottom > height
+        or gauge.x < 0 or gauge.y < 0 or gauge.right > width or gauge.bottom > height
+    ):
+        return "invalid_box"
+    radius = max(4.0, min(button.w, button.h) / 2.0)
+    gap = button.y - gauge.bottom
+    if gap < -radius * 0.5 or gap > radius * 2.5 or abs(gauge.cx - button.cx) > radius * 2.0:
+        return "implausible_gauge_position"
+    return None
+
+
 def detect_quality(
     frame: np.ndarray,
     button: Box | None,
     gauge: Box | None,
     config: DetectorConfig,
+    diagnostics: dict[str, object] | None = None,
 ) -> tuple[str | None, float, dict[str, int]]:
+    if diagnostics is not None:
+        diagnostics["coordinate_space"] = "work_frame"
+        diagnostics["button_box"] = button.to_dict() if button is not None else None
+        diagnostics["gauge_box"] = gauge.to_dict() if gauge is not None else None
     if button is None or gauge is None:
+        if diagnostics is not None:
+            diagnostics["status"] = "not_attempted"
         return None, 0.0, {}
     height, width = frame.shape[:2]
+    geometry_issue = _gauge_geometry_issue(button, gauge, width, height)
+    if geometry_issue is not None:
+        if diagnostics is not None:
+            diagnostics["status"] = geometry_issue
+        return None, 0.0, {}
     radius = max(4.0, min(button.w, button.h) / 2.0)
     roi_top = gauge.y - radius * 3.10
     roi_bottom = gauge.y - radius * 0.22
     roi = _clip_box(gauge.x - radius * 0.9, roi_top, gauge.w + radius * 1.8, roi_bottom - roi_top, width, height)
     crop = _crop(frame, roi)
+    if diagnostics is not None:
+        diagnostics["roi_box"] = roi.to_dict()
+    if roi.area == 0 or crop.size == 0 or crop.shape[0] == 0 or crop.shape[1] == 0:
+        if diagnostics is not None:
+            diagnostics["status"] = "empty_roi"
+        return None, 0.0, {}
+    if diagnostics is not None:
+        diagnostics["status"] = "analyzed"
     # Water is broad and low-frequency; opening removes much of it while
     # leaving the saturated, high-contrast quality word.
     masks = {
@@ -1036,7 +1070,17 @@ class FrameAnalyzer:
             # The prompt itself contains a yellow progress strip.  It is not
             # the later QTE bar and must not trigger QTE/quality states.
             work_gauge, gauge_score, marker_x, marker_width, target_range = None, 0.0, None, None, None
-        work_quality, quality_score, quality_pixels = detect_quality(work, work_button, work_gauge, self.config)
+        rejected_gauge = None
+        gauge_geometry_issue = None
+        if work_button is not None and work_gauge is not None:
+            gauge_geometry_issue = _gauge_geometry_issue(work_button, work_gauge, work_w, work_h)
+            if gauge_geometry_issue is not None:
+                rejected_gauge = work_gauge
+                work_gauge, gauge_score, marker_x, marker_width, target_range = None, 0.0, None, None, None
+        quality_roi: dict[str, object] = {}
+        work_quality, quality_score, quality_pixels = detect_quality(
+            work, work_button, work_gauge, self.config, quality_roi,
+        )
         gauge_state_visible = work_gauge is not None and gauge_score >= self.config.gauge_min_state_score
         quality_state_visible = work_quality is not None and gauge_state_visible
 
@@ -1123,6 +1167,15 @@ class FrameAnalyzer:
             "center_yellow_pixels": yellow_pixels,
             "center_yellow_ratio": round(yellow_ratio, 6),
             "quality_pixels": quality_pixels,
+            "quality_roi": quality_roi,
+            "gauge_geometry": {
+                "status": gauge_geometry_issue or ("accepted" if work_gauge is not None else "not_detected"),
+                "rejected_box_work": rejected_gauge.to_dict() if rejected_gauge is not None else None,
+                "rejected_box_frame": (
+                    _restore_box(rejected_gauge, scale, width, height).to_dict()
+                    if rejected_gauge is not None else None
+                ),
+            },
             "prompt_progress": prompt_progress,
             "gauge_marker_width": round(marker_width, 5) if marker_width is not None else None,
             "gauge_target_width": round(tracked_target_range[1] - tracked_target_range[0], 5) if tracked_target_range else None,
