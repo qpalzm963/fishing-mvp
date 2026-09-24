@@ -121,6 +121,46 @@ def test_live_retry_after_narrow_qte_miss_then_success(session, tmp_path):
     assert all(record["action"] is None for record in records if record["recovering"])
 
 
+def test_sent_start_without_transition_stops_once_with_diagnostics(session, tmp_path):
+    session.config.automation.unconfirmed_waiting_timeout_s = 0.25
+    session.frames.extend([detection(FishingState.WAITING) for _ in range(6)])
+
+    summary = run(session, tmp_path, full_auto=True)
+
+    assert summary["stop_reason"] == "start_unconfirmed"
+    assert summary["completed_rounds"] == 0
+    starts = [item for item in summary["actions"] if "waiting/start" in item["reason"]]
+    assert len(starts) == 1
+    event = summary["retry"]["events"][0]
+    assert event["failure_reason"] == "start_unconfirmed"
+    assert event["start_action"]["input_path"] == "scrcpy_control"
+    assert event["start_action"]["x"] == starts[0]["sent_action"]["x"]
+    assert event["elapsed_since_start_s"] >= 0.25
+
+
+def test_unconfirmed_start_uses_bounded_retry_before_next_tap(session, tmp_path):
+    session.config.automation.auto_retry_enabled = True
+    session.config.automation.unconfirmed_waiting_timeout_s = 0.25
+    session.config.automation.retry_delay_ms = 100
+    session.frames.extend([
+        *[detection(FishingState.WAITING) for _ in range(6)],
+        detection(FishingState.PROMPT), detection(FishingState.CASTING),
+        detection(FishingState.RESULT), detection(FishingState.WAITING),
+    ])
+
+    summary = run(session, tmp_path, full_auto=True)
+
+    assert summary["stop_reason"] == "completed_rounds"
+    assert summary["completed_rounds"] == 1
+    assert summary["retry"]["retry_attempts"] == 1
+    events = summary["retry"]["events"]
+    assert events[0]["failure_reason"] == "start_unconfirmed"
+    assert events[0]["decision"] == "wait_for_recovery"
+    starts = [item for item in summary["actions"] if "waiting/start" in item["reason"]]
+    assert len(starts) == 2
+    assert starts[1]["timestamp_s"] - starts[0]["timestamp_s"] >= 0.35
+
+
 def test_live_retry_exhausts_session_budget(session, tmp_path):
     session.config.automation.auto_retry_enabled = True
     session.config.automation.retry_delay_ms = 0

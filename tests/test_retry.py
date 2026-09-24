@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from fishing_mvp.config import AppConfig
-from fishing_mvp.models import Box, Detection, FishingState
+from fishing_mvp.models import Action, ActionType, Box, Detection, FishingState
 from fishing_mvp.retry import AttemptRecovery
 from fishing_mvp.state_machine import AutomationProgress
 
@@ -47,6 +47,60 @@ def test_disabled_keeps_unconfirmed_waiting_timeout_and_reports_qte_miss():
     assert controller.progress.stop_reason == "state_timeout:waiting"
     assert controller.events[-1]["failure_reason"] == "qte_miss"
     assert controller.retries == 0
+
+
+def test_sent_start_stops_with_diagnostic_reason_after_eight_seconds():
+    controller = recovery()
+    controller.config.automation.auto_retry_enabled = False
+    observe(controller, FishingState.WAITING, 0)
+    controller.record_start_action(
+        observation(FishingState.WAITING, 0),
+        Action(ActionType.TAP, x=50, y=170, x_norm=0.5, y_norm=0.85),
+        "scrcpy_control", 0.0,
+    )
+    observe(controller, FishingState.WAITING, 7.9)
+    assert controller.progress.stop_reason is None
+    assert not controller.progress.start_allowed
+
+    observe(controller, FishingState.WAITING, 8.0)
+    assert controller.progress.stop_reason == "start_unconfirmed"
+    assert controller.progress.completed_rounds == 0
+    event = controller.events[-1]
+    assert event["failure_reason"] == "start_unconfirmed"
+    assert event["elapsed_since_start_s"] == 8.0
+    assert event["last_state"] == "waiting"
+    assert event["start_action"]["input_path"] == "scrcpy_control"
+    assert (event["start_action"]["x"], event["start_action"]["y"]) == (50, 170)
+
+
+def test_sent_start_retries_only_from_a_confirmed_safe_waiting_screen():
+    controller = recovery(retry_delay_ms=100)
+    observe(controller, FishingState.WAITING, 0)
+    controller.record_start_action(
+        observation(FishingState.WAITING, 0), Action(ActionType.TAP, x=50, y=170), "scrcpy_control", 0.0,
+    )
+    assert observe(controller, FishingState.WAITING, 8.0)
+    assert controller.recovering
+    assert controller.events[-1]["failure_reason"] == "start_unconfirmed"
+    observe(controller, FishingState.WAITING, 8.1)
+    observe(controller, FishingState.WAITING, 8.2)
+    assert controller.retries == 1
+    assert not controller.recovering
+    assert controller.progress.start_allowed
+
+
+def test_unconfirmed_start_does_not_retry_from_unsafe_waiting():
+    controller = recovery()
+    observe(controller, FishingState.WAITING, 0)
+    controller.record_start_action(
+        observation(FishingState.WAITING, 0), Action(ActionType.TAP, x=50, y=170), "scrcpy_control", 0.0,
+    )
+
+    unsafe = replace(observation(FishingState.WAITING, 8), confidence=0.1)
+    assert not controller.update(unsafe, FishingState.WAITING, None)
+    assert not controller.recovering
+    assert controller.progress.stop_reason == "start_unconfirmed"
+    assert controller.events[-1]["recoverable"] is False
 
 
 def test_budget_is_shared_across_successful_rounds():

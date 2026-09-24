@@ -410,6 +410,10 @@ def run_live(
                         if state == FishingState.QTE:
                             pending_qte_actions.append(action_record)
                         actions.append(action_record)
+                        if recovery is not None and send_actions and state == FishingState.WAITING:
+                            recovery.record_start_action(
+                                detection, sent_action, input_path, dispatch_finished_s or timestamp_s,
+                            )
                     if transition is not None:
                         try:
                             save_snapshot(

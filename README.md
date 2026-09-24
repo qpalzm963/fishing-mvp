@@ -99,6 +99,8 @@ Tracker 對 target 收縮採立即收斂，單一較寬觀測不會重新放大 
 
 2026-09-21 錄影的後段 QTE 回歸另修正兩種誤判：Cool 除了藍色面積，還須有橫向排列的字形組件，避免水面特效觸發 QUALITY 而停按；指針僅遮住黃區一側時，若未遮住的邊緣仍一致，最多沿用 `gauge_target_tracking_missing_frames` 幀的完整目標。未被指針遮擋的收縮與目標移動仍立即更新。影片重播只驗證偵測與點擊提案，實機命中仍需以 live 執行確認。
 
+Quality 字樣搜尋區域若裁切為空，該幀會略過 quality 判定；與 action button 位置不合理的 gauge 會被拒絕，避免錯誤位置進入 QTE 點擊。逐幀 `features.quality_roi` 與 `features.gauge_geometry` 保留裁切範圍及拒絕原因，方便定位實機誤判。
+
 使用提供的影片驗證 Issue #5：
 
 ```bash
@@ -189,11 +191,13 @@ automation:
 
 QTE／QUALITY 未經 RESULT 就穩定回到 WAITING，或整段 QTE 超時，會標記 `qte_miss`。單次 tap 未見成功不立即結束整輪，仍保留原有下一次掃掠的補救。其他活動階段未經 RESULT 回到 WAITING，或已知階段超時，也可進入有限的復原等待；短暫按鈕／gauge 遺失不會立即重試。
 
+開始點擊實際送出後，若 `unconfirmed_waiting_timeout_s`（預設 8 秒）內仍停在 WAITING，會標記 `start_unconfirmed`。關閉 Auto Retry 時停止並在 portable 顯示明確訊息；開啟時只有再次確認安全的開始畫面，才可使用同一份重試額度。診斷事件會保存送出座標、輸入路徑、最後狀態與等待時間。未送出的 dry-run 提案不會觸發此判定。
+
 復原期間不送出任何輸入，也不計入遲到的結算。系統清除 detector、狀態機、QTE marker／target／velocity、pending observation、cooldown、re-arm 與延遲樣本。只有失敗後取得的畫面能確認 WAITING；信心須達原有門檻、開始按鈕可辨識、沒有 prompt／gauge，並連續符合 `stable_frames`，才能在重試間隔屆滿後重新開始。靜止 scrcpy 畫面可重用失敗後解碼的影格，失敗前的影格不能啟動重試。
 
 復原等待從判定失敗時計算，包含 retry delay；`retry_recovery_timeout_s` 應大於 `retry_delay_ms / 1000` 並留出辨識時間，否則會先逾時停止。等待超時記錄 `retry_recovery_timeout`，額度用盡記錄 `max_retry_attempts`。UNKNOWN 超時、ERROR、擷取／連線／權限／輸入錯誤仍停止；STOP／Ctrl+C／執行時間上限也不會觸發重試。
 
-關閉 Auto Retry 時，保留既有停止時機（包含未經 RESULT 返回 WAITING 後的 8 秒等待），只增加診斷。`live_detections.jsonl` 的 `retry_events`、`live_summary.json` 的 `retry.events` 與 `[Retry]` log 記錄 attempt、失敗原因、QTE miss 原因、額度、間隔、復原決策及重試後是否成功。Portable 的 log 保存在同次執行的 `diagnostics.log`，自動重試不建立新 session；畫面上的手動重試仍會開始一組新的指定輪數。離線影片分析不執行整輪重試。
+關閉 Auto Retry 時，已送出但未確認的開始點擊會在 8 秒後停止；未經 RESULT 返回 WAITING 仍使用既有的 8 秒等待。`live_detections.jsonl` 的 `retry_events`、`live_summary.json` 的 `retry.events` 與 `[Retry]` log 記錄 attempt、失敗原因、QTE miss 原因、額度、間隔、復原決策及重試後是否成功。Portable 的 log 保存在同次執行的 `diagnostics.log`，自動重試不建立新 session；畫面上的手動重試仍會開始一組新的指定輪數。離線影片分析不執行整輪重試。
 
 部分金色魚／獎勵動畫在第一次按下動態偵測到的繼續或關閉控制後，還需要再確認一次。若 `RESULT` 仍維持，full-auto 會等待 `result_extra_tap_delay_s`，重新偵測當下的繼續／關閉控制並優先點擊它；只有沒有明確控制時，才會使用通過輪廓驗證的中央結果覆蓋層候選。總嘗試次數受 `result_max_attempts` 限制，且只有畫面仍被辨識為結果覆蓋層時才會重試；狀態離開 `RESULT` 後立即停止點擊，避免誤觸釣魚畫面。
 

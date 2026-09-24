@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import AppConfig
-from .models import Detection, FishingState, StateTransition
+from .models import Action, Detection, FishingState, StateTransition
 from .state_machine import AutomationPhase, AutomationProgress
 
 
@@ -22,6 +22,7 @@ class AttemptRecovery:
     unknown_since: float | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     last_failure: str | None = None
+    start_action: dict[str, Any] | None = None
 
     @property
     def recovering(self) -> bool:
@@ -38,6 +39,22 @@ class AttemptRecovery:
             "decision": decision,
             **details,
         })
+
+    def record_start_action(
+        self, detection: Detection, action: Action, input_path: str, dispatched_at_s: float,
+    ) -> None:
+        """Track an actual start input until an active fishing state confirms it."""
+        self.start_action = {
+            "timestamp_s": dispatched_at_s,
+            "x": action.x,
+            "y": action.y,
+            "x_norm": action.x_norm,
+            "y_norm": action.y_norm,
+            "input_path": input_path,
+            "frame_index": detection.frame_index,
+            "frame_pts_us": detection.frame_pts_us,
+        }
+        self.progress.start_allowed = False
 
     def update(self, detection: Detection, state: FishingState,
                transition: StateTransition | None) -> bool:
@@ -103,6 +120,11 @@ class AttemptRecovery:
 
         before = progress.completed_rounds
         progress.observe(state, now, transition)
+        if state in {FishingState.PROMPT, FishingState.CASTING, FishingState.QTE,
+                     FishingState.QUALITY, FishingState.RESULT}:
+            self.start_action = None
+        elif self.start_action is not None:
+            progress.start_allowed = False
         self.qte_seen |= state in {FishingState.QTE, FishingState.QUALITY}
         if progress.completed_rounds > before:
             self._event(detection, state, "success", after_retry=self.last_failure is not None)
@@ -114,22 +136,49 @@ class AttemptRecovery:
 
         incomplete = state == FishingState.WAITING and progress.round_active and not progress.result_seen
         timed_out = progress.timed_out(now, cfg)
+        start_unconfirmed = (
+            self.start_action is not None
+            and state == FishingState.WAITING
+            and now - self.start_action["timestamp_s"] >= max(0.0, cfg.unconfirmed_waiting_timeout_s)
+        )
         state_error = cfg.auto_retry_enabled and (state == FishingState.ERROR or detection.hint == FishingState.ERROR)
-        # Disabled mode deliberately keeps the legacy unconfirmed-WAITING wait.
-        if not (timed_out or state_error or (cfg.auto_retry_enabled and incomplete)):
+        if not (start_unconfirmed or timed_out or state_error or (cfg.auto_retry_enabled and incomplete)):
             return False
-        stop_reason = "state_error" if state_error else f"state_timeout:{state.value}"
+        if state_error:
+            stop_reason = "state_error"
+        elif start_unconfirmed:
+            stop_reason = "start_unconfirmed"
+        else:
+            stop_reason = f"state_timeout:{state.value}"
         qte_miss = self.qte_seen and (incomplete or state in {FishingState.QTE, FishingState.QUALITY})
-        reason = "qte_miss" if qte_miss else "attempt_incomplete" if incomplete else stop_reason
+        reason = "start_unconfirmed" if start_unconfirmed else "qte_miss" if qte_miss else "attempt_incomplete" if incomplete else stop_reason
         self.last_failure = reason
         recoverable = state not in {FishingState.UNKNOWN, FishingState.ERROR} and not state_error
+        if start_unconfirmed:
+            recoverable = recoverable and (
+                detection.hint == FishingState.WAITING
+                and detection.confidence >= self.config.action.min_confidence
+                and detection.action_button is not None
+                and detection.prompt_box is None and detection.gauge_box is None
+            )
         exhausted = self.retries >= cfg.max_retry_attempts
         retry = cfg.auto_retry_enabled and recoverable and not exhausted
+        start_details: dict[str, Any] = {}
+        if start_unconfirmed:
+            assert self.start_action is not None
+            start_details = {
+                "start_action": self.start_action,
+                "elapsed_since_start_s": round(now - self.start_action["timestamp_s"], 3),
+                "last_hint": detection.hint.value,
+                "last_confidence": detection.confidence,
+            }
         self._event(detection, state, "wait_for_recovery" if retry else "stop",
                     failure_reason=reason, recoverable=recoverable,
                     qte_miss_reason=("returned_to_waiting_without_result" if incomplete else "qte_timeout") if qte_miss else None,
                     max_retries_reached=exhausted,
-                    next_attempt=self.attempt + 1 if retry else None)
+                    next_attempt=self.attempt + 1 if retry else None,
+                    **start_details)
+        self.start_action = None
         if not retry:
             progress.stop_reason = "max_retry_attempts" if cfg.auto_retry_enabled and recoverable and exhausted else stop_reason
             self.events[-1]["stop_reason"] = progress.stop_reason
