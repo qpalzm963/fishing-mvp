@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Fishing MVP</string>
+    <string name="accessibility_label">Fishing MVP 點擊服務</string>
+    <string name="accessibility_description">只在你從懸浮視窗按下「開始」且切換為實機模式後，對你指定的遊戲 package 送出點擊。用來判斷目前前景 App，並以手勢送出點擊；不讀取或上傳其他內容。</string>
+</resources>
