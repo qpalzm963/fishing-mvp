@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.MotionEvent
@@ -16,15 +17,16 @@ import android.widget.Switch
 import android.widget.TextView
 
 /**
- * Small draggable floating panel: rounds (1–999), Dry-run/LIVE switch,
- * Start/Stop and a status line.  The window is not focusable so it never
+ * Small draggable floating panel: a run switch (on = start, off = stop), the
+ * Dry-run/LIVE switch and a status line.  The window is not focusable so it never
  * steals input focus from the game, and taps inside its bounds are refused.
  * LIVE resets to off after every session.
  */
 @SuppressLint("SetTextI18n", "UseSwitchCompatOrMaterialCode")
 class OverlayController(
     private val context: Context,
-    private val onStart: (rounds: Int, live: Boolean) -> Unit,
+    /** Returns false when the session could not start, so the run switch snaps back off. */
+    private val onStart: (live: Boolean) -> Boolean,
     private val onStop: () -> Unit,
     private val onClose: () -> Unit,
 ) {
@@ -45,14 +47,16 @@ class OverlayController(
     var bounds: Rect? = null
         private set
 
-    private var rounds = Prefs.rounds(context)
     private var shown = false
+    private var settingRunning = false
     private val root: LinearLayout
-    private val roundsView: TextView
+    private val runSwitch: Switch
     private val liveSwitch: Switch
-    private val startButton: Button
-    private val stopButton: Button
     private val statusView: TextView
+    private val statsView: TextView
+    private val statsHeader: TextView
+    private var statsExpanded = Prefs.statsExpanded(context)
+    private var statsSummary = ""
 
     init {
         val dp = context.resources.displayMetrics.density
@@ -91,53 +95,57 @@ class OverlayController(
         header.addView(button("✕") { onClose() })
         root.addView(header)
 
-        val roundsRow = row()
-        roundsRow.addView(label("輪數 "))
-        roundsView = label(rounds.toString(), 15f).apply {
-            minWidth = px(36)
-            gravity = Gravity.CENTER
-        }
-        val minus = button("−") { setRounds(rounds - 1) }.apply {
-            setOnLongClickListener { setRounds(rounds - 10); true }
-        }
-        val plus = button("+") { setRounds(rounds + 1) }.apply {
-            setOnLongClickListener { setRounds(rounds + 10); true }
-        }
-        roundsRow.addView(minus)
-        roundsRow.addView(roundsView)
-        roundsRow.addView(plus)
-        root.addView(roundsRow)
-
         liveSwitch = Switch(context).apply {
-            text = "實機點擊 LIVE"
+            text = "試跑模式：只看不點"
             setTextColor(Color.LTGRAY)
             isChecked = false
             setOnCheckedChangeListener { _, checked ->
+                text = if (checked) "正式模式：會真的點擊" else "試跑模式：只看不點"
                 setTextColor(if (checked) Color.rgb(255, 90, 90) else Color.LTGRAY)
             }
         }
         root.addView(liveSwitch)
-
-        val controls = row()
-        startButton = button("開始") {
-            Prefs.setRounds(context, rounds)
-            onStart(rounds, liveSwitch.isChecked)
+        // The run switch sits above LIVE and reads it at the moment it is switched on.
+        runSwitch = Switch(context).apply {
+            text = "自動釣魚"
+            setTextColor(Color.WHITE)
+            isChecked = false
+            setOnCheckedChangeListener { _, checked ->
+                if (settingRunning) return@setOnCheckedChangeListener
+                if (checked) {
+                    if (!onStart(liveSwitch.isChecked)) setRunning(false)
+                } else {
+                    onStop()
+                }
+            }
         }
-        stopButton = button("停止") { onStop() }.apply { isEnabled = false }
-        controls.addView(startButton)
-        controls.addView(stopButton)
-        root.addView(controls)
+        root.addView(runSwitch, root.indexOfChild(liveSwitch))
 
         statusView = label("", 12f).apply { maxWidth = px(220) }
         root.addView(statusView)
 
+        statsHeader = label("", 12f).apply {
+            setTextColor(Color.rgb(190, 225, 255))
+            setPadding(0, px(6), 0, px(2))
+            visibility = View.GONE
+            setOnClickListener {
+                statsExpanded = !statsExpanded
+                Prefs.setStatsExpanded(context, statsExpanded)
+                renderStats()
+            }
+        }
+        root.addView(statsHeader)
+
+        statsView = label("", 12f).apply {
+            typeface = Typeface.MONOSPACE
+            setTextColor(Color.rgb(190, 225, 255))
+            setPadding(0, px(6), 0, 0)
+            visibility = View.GONE
+        }
+        root.addView(statsView)
+
         handle.setOnTouchListener(DragListener())
         root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateBounds() }
-    }
-
-    private fun setRounds(value: Int) {
-        rounds = value.coerceIn(1, 999)
-        roundsView.text = rounds.toString()
     }
 
     private fun updateBounds() {
@@ -171,14 +179,29 @@ class OverlayController(
     }
 
     fun setRunning(running: Boolean) {
-        startButton.isEnabled = !running
-        stopButton.isEnabled = running
+        settingRunning = true
+        runSwitch.isChecked = running
+        settingRunning = false
         liveSwitch.isEnabled = !running
         if (!running) liveSwitch.isChecked = false // back to dry-run after every session
     }
 
     fun setStatus(text: String) {
         statusView.text = text
+    }
+
+    /** Run statistics block; an empty string hides it. [summary] stays visible while it is folded. */
+    fun setStats(text: String, summary: String = "") {
+        statsView.text = text
+        statsSummary = summary
+        renderStats()
+    }
+
+    private fun renderStats() {
+        val has = statsView.text.isNotEmpty()
+        statsHeader.visibility = if (has) View.VISIBLE else View.GONE
+        statsHeader.text = if (statsExpanded) "▾ 執行資訊（點一下折疊）" else "▸ 執行資訊　$statsSummary"
+        statsView.visibility = if (has && statsExpanded) View.VISIBLE else View.GONE
     }
 
     private inner class DragListener : View.OnTouchListener {

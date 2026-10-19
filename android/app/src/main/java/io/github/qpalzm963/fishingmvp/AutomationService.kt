@@ -56,6 +56,33 @@ class AutomationService : Service() {
         private const val NOTIFICATION_ID = 42
         private const val NO_FRAME_TIMEOUT_MS = 5000L
 
+        /** No user-set round count: run until stopped, capped by the session's own 1–999 limit. */
+        private const val MAX_ROUNDS = 999
+
+        fun clock(ms: Long): String {
+            val total = ms / 1000
+            return String.format(Locale.US, "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+        }
+
+        /** One-line version of the statistics, shown while the panel is folded. */
+        fun statsSummary(elapsedMs: Long, done: Int): String = "$done 輪 · ${clock(elapsedMs)}"
+
+        /** Compact run statistics for the overlay panel. */
+        fun statsText(elapsedMs: Long, done: Int, failed: Int, lastRoundMs: Long?): String {
+            fun short(ms: Long): String {
+                val seconds = ms / 1000.0
+                return if (seconds < 60) String.format(Locale.US, "%.1f 秒", seconds)
+                else String.format(Locale.US, "%d:%02d", ms / 60000, (ms / 1000) % 60)
+            }
+            return listOf(
+                "執行時間  " + clock(elapsedMs),
+                "完成輪數  $done",
+                "平均每輪  " + if (done > 0) short(elapsedMs / done) else "—",
+                "上一輪    " + (lastRoundMs?.let(::short) ?: "—"),
+                "失手次數  $failed",
+            ).joinToString("\n")
+        }
+
         @Volatile
         var isRunning = false
             private set
@@ -162,7 +189,7 @@ class AutomationService : Service() {
         python.execute {
             try {
                 Python.getInstance().getModule("fishing_mvp.mobile")
-                mainHandler.post { overlay?.setStatus("就緒：先以 Dry-run 測試") }
+                mainHandler.post { overlay?.setStatus("就緒：先用試跑模式測試（不會點擊）") }
             } catch (exc: Throwable) {
                 Log.e(TAG, "python import failed", exc)
                 mainHandler.post { overlay?.setStatus("Python 載入失敗：${exc.message}") }
@@ -171,24 +198,26 @@ class AutomationService : Service() {
     }
 
     // ------------------------------------------------------------ session
-    private fun startSession(rounds: Int, live: Boolean) {
-        if (sessionActive) return
-        val target = Prefs.targetPackage(this)
+    private fun startSession(live: Boolean): Boolean {
+        if (sessionActive) return false
         val a11y = TapAccessibilityService.instance
         when {
-            target.isEmpty() -> { overlay?.setStatus("請先在 App 主畫面設定遊戲 package"); return }
-            a11y == null -> { overlay?.setStatus("請先開啟無障礙服務（前景檢查與點擊都需要）"); return }
-            imageReader == null -> { overlay?.setStatus("尚未取得螢幕擷取權限"); return }
+            a11y == null -> { overlay?.setStatus("請先開啟無障礙服務（前景檢查與點擊都需要）"); return false }
+            imageReader == null -> { overlay?.setStatus("尚未取得螢幕擷取權限"); return false }
         }
-        val foreground = a11y!!.refreshForeground()
-        if (foreground != target) {
-            overlay?.setStatus("前景不是目標遊戲：$foreground\n請切到 $target 再按開始")
-            return
+        // Manual trigger: the app in the foreground when Start is pressed becomes this session's
+        // locked target (the overlay is a system window and is ignored by the lookup).
+        val target = a11y!!.refreshForeground()
+        if (target == null || a11y.isNonGamePackage(target)) {
+            overlay?.setStatus("請先切到遊戲再打開開關\n目前前景：${target ?: "未知"}")
+            return false
         }
         stopRequested = false
         sessionActive = true
+        overlay?.setStats("")
         overlay?.setRunning(true)
-        python.execute { runSession(target, rounds, live) }
+        python.execute { runSession(target, MAX_ROUNDS, live) }
+        return true
     }
 
     private fun requestStop() {
@@ -217,12 +246,18 @@ class AutomationService : Service() {
                     .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
                     .put("sdk", Build.VERSION.SDK_INT)
                     .put("min_tap_ms", GestureDispatcher.MIN_TAP_MS)
+                    .put("auto_retry", Prefs.autoRetry(this))
                     .toString(2)
             )
         }
         event("session start live=$live rounds=$rounds package=$target")
         var summary: String? = null
         var session: PyObject? = null
+        val startedMs = SystemClock.elapsedRealtime()
+        var roundStartMs = startedMs
+        var lastRoundMs: Long? = null
+        var doneRounds = 0
+        var failedAttempts = 0
         try {
             val dispatcher = if (live) GestureDispatcher(
                 targetPackage = target,
@@ -242,6 +277,7 @@ class AutomationService : Service() {
                 target,
                 if (configFile.isFile) configFile.absolutePath else null,
                 dispatcher,
+                Prefs.autoRetry(this),
             )
             session.callAttr("set_device_size", screenW, screenH)
             var buffer: ByteArray? = null
@@ -284,7 +320,20 @@ class AutomationService : Service() {
                         "process_rgba", frame, captureWidth, captureHeight, rowStride, capturedAt, reused, foreground,
                     ).toString()
                 )
-                postStatus(result, live)
+                postStatus(result, live, target)
+                val done = result.optInt("completed_rounds")
+                if (done > doneRounds) {
+                    val now = SystemClock.elapsedRealtime()
+                    lastRoundMs = now - roundStartMs
+                    roundStartMs = now
+                    doneRounds = done
+                }
+                // `attempt` advances on every success and every retry, so the surplus is failed attempts.
+                failedAttempts = maxOf(failedAttempts, result.optInt("attempt") - 1 - done)
+                val elapsed = SystemClock.elapsedRealtime() - startedMs
+                val stats = statsText(elapsed, doneRounds, failedAttempts, lastRoundMs)
+                val summary = statsSummary(elapsed, doneRounds)
+                mainHandler.post { overlay?.setStats(stats, summary) }
                 if (result.optBoolean("stopped")) break
                 val intervalMs = (result.optDouble("next_interval_s", 0.1) * 1000).toLong()
                 val remaining = loopStart + intervalMs - SystemClock.uptimeMillis()
@@ -302,24 +351,28 @@ class AutomationService : Service() {
             val err = json?.optJSONObject("error")?.optString("message")
             event("session stop reason=$reason completed=$done error=$err dir=${dir.absolutePath}")
             sessionActive = false
+            val finalElapsed = SystemClock.elapsedRealtime() - startedMs
+            val finalStats = statsText(finalElapsed, doneRounds, failedAttempts, lastRoundMs)
+            val finalSummary = statsSummary(finalElapsed, doneRounds)
             mainHandler.post {
                 overlay?.setRunning(false)
+                overlay?.setStats(finalStats, finalSummary)
                 overlay?.setStatus(
-                    "已停止：$reason（完成 $done/$rounds）" + (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
+                    "已停止：${Labels.stopReason(reason)}（完成 $done 輪）" + (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
                 )
             }
         }
     }
 
-    private fun postStatus(result: JSONObject, live: Boolean) {
+    private fun postStatus(result: JSONObject, live: Boolean, target: String) {
         val text = buildString {
-            append(if (live) "LIVE" else "DRY-RUN")
-            append(" · ").append(result.optString("state"))
-            append(" · ").append(result.optInt("completed_rounds")).append('/').append(result.optInt("max_rounds"))
+            append(if (live) "正式" else "試跑")
+            append(" · ").append(Labels.state(result.optString("state")))
             if (!result.isNull("analysis_ms")) append(" · ").append(result.optDouble("analysis_ms").toInt()).append("ms")
             val action = result.optJSONObject("action")
-            if (action != null) append(if (result.optBoolean("sent")) "\n點擊：" else "\n提案：").append(action.optString("reason"))
+            if (action != null) append(if (result.optBoolean("sent")) "\n已點擊：" else "\n打算點：").append(action.optString("reason"))
             if (result.optBoolean("recovering")) append("\n重試復原中…")
+            append("\n目標：").append(target)
         }
         mainHandler.post { overlay?.setStatus(text) }
     }
@@ -362,7 +415,7 @@ class AutomationService : Service() {
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle("Fishing MVP 擷取中")
-            .setContentText("懸浮視窗控制開始／停止；預設 Dry-run")
+            .setContentText("用懸浮視窗的開關控制；預設為試跑模式（不會點擊）")
             .setContentIntent(open)
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "結束", stop).build())
