@@ -71,6 +71,7 @@ class AutomationService : Service() {
     private lateinit var python: ExecutorService
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
+    @Volatile
     private var imageReader: ImageReader? = null
     private var imageThread: HandlerThread? = null
     private var overlay: OverlayController? = null
@@ -268,6 +269,8 @@ class AutomationService : Service() {
                 }
                 val frame = buffer
                 if (frame == null) {
+                    // Only guards the first frame: a static screen legitimately produces no
+                    // new frames, so later stalls are left to the Python stage timeouts.
                     if (SystemClock.uptimeMillis() - lastNewFrameMs > NO_FRAME_TIMEOUT_MS) {
                         kotlinStop = "no_frames"
                         break
@@ -374,14 +377,22 @@ class AutomationService : Service() {
         stopRequested = true
         overlay?.hide()
         overlay = null
-        virtualDisplay?.release()
+        // The python thread may be reading an Image from the reader right now.
+        // Release capture on that same thread, after the running session exits.
+        val display = virtualDisplay
+        val reader = imageReader
+        val thread = imageThread
+        val mp = projection
         virtualDisplay = null
-        imageReader?.close()
         imageReader = null
-        imageThread?.quitSafely()
         imageThread = null
-        projection?.stop()
         projection = null
+        python.execute {
+            display?.release()
+            reader?.close()
+            thread?.quitSafely()
+            mp?.stop()
+        }
         isRunning = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
