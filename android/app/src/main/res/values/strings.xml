@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">Fishing MVP</string>
     <string name="accessibility_label">Fishing MVP 點擊服務</string>
-    <string name="accessibility_description">只在你從懸浮視窗打開「自動釣魚」且切換為實機模式後，對打開開關當下位於前景的遊戲送出點擊。用來判斷目前前景 App，並以手勢送出點擊；不讀取或上傳其他內容。</string>
+    <string name="accessibility_description">只在你從懸浮視窗打開「自動釣魚」且切到正式模式後，對打開開關當下位於前景的遊戲送出點擊。用來判斷目前前景 App，並以手勢送出點擊；不讀取或上傳其他內容。</string>
 </resources>

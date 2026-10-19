@@ -93,10 +93,11 @@ class OverlayController(
         root.addView(header)
 
         liveSwitch = Switch(context).apply {
-            text = "實機點擊 LIVE"
+            text = "試跑模式：只看不點"
             setTextColor(Color.LTGRAY)
             isChecked = false
             setOnCheckedChangeListener { _, checked ->
+                text = if (checked) "正式模式：會真的點擊" else "試跑模式：只看不點"
                 setTextColor(if (checked) Color.rgb(255, 90, 90) else Color.LTGRAY)
             }
         }

@@ -257,7 +257,7 @@ class MainActivity : Activity() {
         // Step 2: accessibility service
         val a11yPage = page(
             1, STEP_NAMES[1],
-            "用來確認目前前景是哪個 App，並在 LIVE 時送出點擊。不會讀取或上傳畫面以外的內容。",
+            "用來確認目前前景是哪個 App，並在正式模式時送出點擊。不會讀取或上傳畫面以外的內容。",
         )
         a11yStatus = statusLine()
         a11yPage.addView(a11yStatus)
@@ -267,7 +267,7 @@ class MainActivity : Activity() {
         a11yPage.addView(text("在清單找到「Fishing MVP 點擊服務」並啟用。Android 13 以上若顯示「受限設定」，先到 App 資訊 → ⋮ → 允許受限設定。", 12f, MUTED))
 
         // Step 3: capture width (+ optional self test)
-        val widthPage = page(2, STEP_NAMES[2], "擷取寬度越小，QTE 延遲越低，但細節越少。")
+        val widthPage = page(2, STEP_NAMES[2], "擷取寬度越小，反應越快，但畫面細節越少。")
         val group = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         val current = Prefs.captureWidth(this)
         Prefs.CAPTURE_WIDTHS.forEach { value ->
@@ -322,7 +322,7 @@ class MainActivity : Activity() {
         startPage.addView(serviceStatus)
         startPage.addView(text("① 按下面的按鈕授權擷取\n② 切到遊戲\n③ 在懸浮視窗打開「自動釣魚」開關，會以當下前景的 App 為目標", 14f, INK))
         startPage.addView(
-            text("預設 Dry-run：只記錄提案，不會點擊。要在懸浮視窗明確打開 LIVE 才會實際點擊，且每輪結束後自動關回。", 13f, OK, bold = true)
+            text("先用「試跑模式」：只看畫面、顯示打算點哪裡，不會真的點。確認判斷正確後，再到懸浮視窗打開「正式模式」才會真的點擊；每次停止後會自動回到試跑。", 13f, OK, bold = true)
                 .apply { setPadding(0, px(8), 0, px(4)) },
         )
         startPage.addView(button("授權螢幕擷取並顯示懸浮視窗", Kind.PRIMARY) { requestCapture() })
@@ -486,8 +486,9 @@ class MainActivity : Activity() {
             for (i in 0 until (frames?.length() ?: 0)) {
                 val frame = frames!!.getJSONObject(i)
                 val name = frame.optString("name")
+                val label = Labels.state(name).padEnd(4, '　')
                 val ok = frame.optString("hint") == name
-                append(name.padEnd(9)).append(if (ok) "✓ " else "✗ ")
+                append(label).append("  ").append(if (ok) "✓ " else "✗ ")
                 when {
                     frame.has("error") -> append(frame.optString("error").take(60))
                     ok -> append("${frame.optDouble("analysis_ms_max").toInt()} ms")
@@ -536,7 +537,7 @@ class MainActivity : Activity() {
             .putExtra(AutomationService.EXTRA_RESULT_CODE, resultCode)
             .putExtra(AutomationService.EXTRA_RESULT_DATA, data)
         startForegroundService(intent)
-        Toast.makeText(this, "已啟動；請切到遊戲，先用 Dry-run 測試", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "已啟動；請切到遊戲，先用試跑模式測試", Toast.LENGTH_LONG).show()
         moveTaskToBack(true)
     }
 }

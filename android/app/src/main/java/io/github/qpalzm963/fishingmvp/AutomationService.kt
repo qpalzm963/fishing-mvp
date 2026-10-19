@@ -182,7 +182,7 @@ class AutomationService : Service() {
         python.execute {
             try {
                 Python.getInstance().getModule("fishing_mvp.mobile")
-                mainHandler.post { overlay?.setStatus("就緒：先以 Dry-run 測試") }
+                mainHandler.post { overlay?.setStatus("就緒：先用試跑模式測試（不會點擊）") }
             } catch (exc: Throwable) {
                 Log.e(TAG, "python import failed", exc)
                 mainHandler.post { overlay?.setStatus("Python 載入失敗：${exc.message}") }
@@ -345,7 +345,7 @@ class AutomationService : Service() {
                 overlay?.setRunning(false)
                 overlay?.setStats(finalStats)
                 overlay?.setStatus(
-                    "已停止：$reason（完成 $done 輪）" + (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
+                    "已停止：${Labels.stopReason(reason)}（完成 $done 輪）" + (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
                 )
             }
         }
@@ -353,11 +353,11 @@ class AutomationService : Service() {
 
     private fun postStatus(result: JSONObject, live: Boolean, target: String) {
         val text = buildString {
-            append(if (live) "LIVE" else "DRY-RUN")
-            append(" · ").append(result.optString("state"))
+            append(if (live) "正式" else "試跑")
+            append(" · ").append(Labels.state(result.optString("state")))
             if (!result.isNull("analysis_ms")) append(" · ").append(result.optDouble("analysis_ms").toInt()).append("ms")
             val action = result.optJSONObject("action")
-            if (action != null) append(if (result.optBoolean("sent")) "\n點擊：" else "\n提案：").append(action.optString("reason"))
+            if (action != null) append(if (result.optBoolean("sent")) "\n已點擊：" else "\n打算點：").append(action.optString("reason"))
             if (result.optBoolean("recovering")) append("\n重試復原中…")
             append("\n目標：").append(target)
         }
@@ -402,7 +402,7 @@ class AutomationService : Service() {
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle("Fishing MVP 擷取中")
-            .setContentText("懸浮視窗控制開始／停止；預設 Dry-run")
+            .setContentText("用懸浮視窗的開關控制；預設為試跑模式（不會點擊）")
             .setContentIntent(open)
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "結束", stop).build())
