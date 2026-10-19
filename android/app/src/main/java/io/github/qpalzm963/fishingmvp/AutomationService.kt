@@ -173,16 +173,16 @@ class AutomationService : Service() {
     // ------------------------------------------------------------ session
     private fun startSession(rounds: Int, live: Boolean) {
         if (sessionActive) return
-        val target = Prefs.targetPackage(this)
         val a11y = TapAccessibilityService.instance
         when {
-            target.isEmpty() -> { overlay?.setStatus("請先在 App 主畫面設定遊戲 package"); return }
             a11y == null -> { overlay?.setStatus("請先開啟無障礙服務（前景檢查與點擊都需要）"); return }
             imageReader == null -> { overlay?.setStatus("尚未取得螢幕擷取權限"); return }
         }
-        val foreground = a11y!!.refreshForeground()
-        if (foreground != target) {
-            overlay?.setStatus("前景不是目標遊戲：$foreground\n請切到 $target 再按開始")
+        // Manual trigger: the app in the foreground when Start is pressed becomes this session's
+        // locked target (the overlay is a system window and is ignored by the lookup).
+        val target = a11y!!.refreshForeground()
+        if (target == null || a11y.isNonGamePackage(target)) {
+            overlay?.setStatus("請先切到遊戲再按開始\n目前前景：${target ?: "未知"}")
             return
         }
         stopRequested = false
@@ -284,7 +284,7 @@ class AutomationService : Service() {
                         "process_rgba", frame, captureWidth, captureHeight, rowStride, capturedAt, reused, foreground,
                     ).toString()
                 )
-                postStatus(result, live)
+                postStatus(result, live, target)
                 if (result.optBoolean("stopped")) break
                 val intervalMs = (result.optDouble("next_interval_s", 0.1) * 1000).toLong()
                 val remaining = loopStart + intervalMs - SystemClock.uptimeMillis()
@@ -311,7 +311,7 @@ class AutomationService : Service() {
         }
     }
 
-    private fun postStatus(result: JSONObject, live: Boolean) {
+    private fun postStatus(result: JSONObject, live: Boolean, target: String) {
         val text = buildString {
             append(if (live) "LIVE" else "DRY-RUN")
             append(" · ").append(result.optString("state"))
@@ -320,6 +320,7 @@ class AutomationService : Service() {
             val action = result.optJSONObject("action")
             if (action != null) append(if (result.optBoolean("sent")) "\n點擊：" else "\n提案：").append(action.optString("reason"))
             if (result.optBoolean("recovering")) append("\n重試復原中…")
+            append("\n目標：").append(target)
         }
         mainHandler.post { overlay?.setStatus(text) }
     }

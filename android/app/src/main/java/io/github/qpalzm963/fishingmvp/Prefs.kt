@@ -5,7 +5,6 @@ import android.content.Context
 /** Small persisted settings shared by the activity, overlay and service. */
 object Prefs {
     private const val NAME = "fishing_mvp"
-    private const val KEY_PACKAGE = "target_package"
     private const val KEY_CAPTURE_WIDTH = "capture_width"
     private const val KEY_ROUNDS = "rounds"
 
@@ -14,13 +13,6 @@ object Prefs {
     const val DEFAULT_CAPTURE_WIDTH = 720
 
     private fun prefs(context: Context) = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
-
-    fun targetPackage(context: Context): String =
-        prefs(context).getString(KEY_PACKAGE, "")?.trim().orEmpty()
-
-    fun setTargetPackage(context: Context, value: String) {
-        prefs(context).edit().putString(KEY_PACKAGE, value.trim()).apply()
-    }
 
     fun captureWidth(context: Context): Int =
         prefs(context).getInt(KEY_CAPTURE_WIDTH, DEFAULT_CAPTURE_WIDTH)

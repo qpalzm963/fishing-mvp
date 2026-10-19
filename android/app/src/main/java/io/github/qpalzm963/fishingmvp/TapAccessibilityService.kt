@@ -2,6 +2,7 @@ package io.github.qpalzm963.fishingmvp
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
 import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
@@ -26,11 +27,6 @@ class TapAccessibilityService : AccessibilityService() {
 
         @Volatile
         var instance: TapAccessibilityService? = null
-            private set
-
-        /** Last foreground app that is not this app; offered as a target suggestion. */
-        @Volatile
-        var lastExternalPackage: String? = null
             private set
     }
 
@@ -80,8 +76,14 @@ class TapAccessibilityService : AccessibilityService() {
         }
         cachedPackage = pkg
         cachedAtMs = SystemClock.uptimeMillis()
-        if (pkg != null && pkg != packageName) lastExternalPackage = pkg
         pkg
+    }
+
+    /** True for this app, the home screen and system UI: never a valid automation target. */
+    fun isNonGamePackage(pkg: String): Boolean {
+        val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        val launchers = packageManager.queryIntentActivities(home, 0).map { it.activityInfo.packageName }
+        return pkg == packageName || pkg == "com.android.systemui" || pkg in launchers
     }
 
     private fun resolveForeground(): String? {
