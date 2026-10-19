@@ -4,17 +4,24 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -27,9 +34,34 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
+/** White text with a thick dark outline, like the game's banner lettering. */
+private class OutlinedTextView(context: Context) : TextView(context) {
+    var outlineColor = Color.BLACK
+    var outlineWidthPx = 0f
+
+    override fun onDraw(canvas: Canvas) {
+        val textLayout = layout
+        if (outlineWidthPx > 0f && textLayout != null) {
+            canvas.save()
+            canvas.translate(compoundPaddingLeft.toFloat(), extendedPaddingTop.toFloat())
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = outlineWidthPx
+            paint.strokeJoin = Paint.Join.ROUND
+            paint.color = outlineColor
+            textLayout.draw(canvas)
+            paint.style = Paint.Style.FILL
+            paint.color = currentTextColor
+            canvas.restore()
+        }
+        super.onDraw(canvas)
+    }
+}
+
 /**
- * Setup screen: permission checklist, target game package, capture width and
- * the button that asks for MediaProjection consent and starts the overlay.
+ * Setup wizard, one gated step at a time: overlay permission, accessibility
+ * service, capture width, then the MediaProjection consent that starts the
+ * floating controls.  A step cannot be passed until its requirement is met, and
+ * a permission that is revoked later sends the user back to its step.
  */
 @SuppressLint("SetTextI18n")
 class MainActivity : Activity() {
@@ -38,127 +70,227 @@ class MainActivity : Activity() {
         private const val REQUEST_CAPTURE = 1001
         private const val REQUEST_NOTIFICATIONS = 1002
 
-        private val BG = Color.parseColor("#F2F4F7")
-        private val CARD = Color.WHITE
-        private val INK = Color.parseColor("#1F2933")
-        private val MUTED = Color.parseColor("#616E7C")
-        private val ACCENT = Color.parseColor("#1A73E8")
-        private val LINE = Color.parseColor("#D5DAE0")
-        private val OK = Color.parseColor("#1E8E3E")
-        private val BAD = Color.parseColor("#D93025")
-        private val WARN = Color.parseColor("#B06000")
-        private val CODE_BG = Color.parseColor("#F2F4F7")
+        private const val STEP_COUNT = 4
+        private const val LAST_STEP = STEP_COUNT - 1
+        private val STEP_NAMES = listOf("懸浮視窗", "無障礙服務", "擷取設定", "開始")
+
+        // Palette taken by eye from the game's UI: teal water, indigo outlines, candy buttons.
+        private val SKY_TOP = Color.parseColor("#47B5D3")
+        private val SKY_BOTTOM = Color.parseColor("#1F6A8C")
+        private val OUTLINE = Color.parseColor("#2B2D5B")
+        private val PANEL = Color.parseColor("#FFF6DD")
+        private val INK = Color.parseColor("#2B2D5B")
+        private val MUTED = Color.parseColor("#6B6F9A")
+        private val ORANGE = Color.parseColor("#FFB020")
+        private val ORANGE_EDGE = Color.parseColor("#E0780F")
+        private val BLUE = Color.parseColor("#5B6BC0")
+        private val BLUE_EDGE = Color.parseColor("#3B4690")
+        private val RED = Color.parseColor("#E8453C")
+        private val RED_EDGE = Color.parseColor("#B22A25")
+        private val LOCKED = Color.parseColor("#B9BCD6")
+        private val LOCKED_EDGE = Color.parseColor("#9498B8")
+        private val OK = Color.parseColor("#1E9E54")
+        private val BAD = Color.parseColor("#D8343A")
+        private val WARN = Color.parseColor("#C77700")
+        private val CODE_BG = Color.parseColor("#F0E6C8")
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     }
 
+    private enum class Kind { PRIMARY, SECONDARY, DANGER }
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val poll = object : Runnable {
+        override fun run() {
+            refresh()
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    private lateinit var panels: List<View>
+    private lateinit var dots: List<TextView>
+    private lateinit var connectors: List<View>
+    private lateinit var prevButton: Button
+    private lateinit var nextButton: Button
+    private lateinit var gateHint: TextView
     private lateinit var overlayStatus: TextView
     private lateinit var a11yStatus: TextView
     private lateinit var serviceStatus: TextView
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        val dp = resources.displayMetrics.density
-        fun px(v: Int) = (v * dp).toInt()
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(px(16), px(12), px(16), px(24))
-        }
-        fun rounded(fill: Int, stroke: Int? = null, radius: Int = 12) = GradientDrawable().apply {
+    private var shownStep = 0
+    private var lastOverlayOk = false
+    private var lastA11yOk = false
+
+    private fun px(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun rounded(fill: Int, stroke: Int? = null, radius: Int = 12, strokeDp: Int = 3) =
+        GradientDrawable().apply {
             setColor(fill)
             cornerRadius = px(radius).toFloat()
-            if (stroke != null) setStroke(px(1), stroke)
+            if (stroke != null) setStroke(px(strokeDp), stroke)
         }
-        fun text(value: String, size: Float = 14f, color: Int = INK) = TextView(this).apply {
+
+    /** A chunky 3D slab: darker edge layer peeking out below the face. */
+    private fun chunky(face: Int, edge: Int, radius: Int, depthDp: Int = 4): Drawable =
+        LayerDrawable(arrayOf(rounded(edge, OUTLINE, radius), rounded(face, OUTLINE, radius))).apply {
+            setLayerInset(1, 0, 0, 0, px(depthDp))
+        }
+
+    private fun text(value: String, size: Float = 14f, color: Int = INK, bold: Boolean = false) =
+        TextView(this).apply {
             text = value
             textSize = size
             setTextColor(color)
             setPadding(0, px(4), 0, px(4))
+            if (bold) setTypeface(typeface, Typeface.BOLD)
         }
-        fun button(value: String, primary: Boolean, click: () -> Unit) = Button(this).apply {
-            text = value
-            setAllCaps(false) // package names are case-sensitive; never upper-case them
-            textSize = 15f
-            stateListAnimator = null
-            minHeight = px(48)
-            minimumHeight = px(48)
-            setTextColor(if (primary) Color.WHITE else ACCENT)
-            val base = if (primary) rounded(ACCENT) else rounded(CARD, LINE)
-            background = RippleDrawable(ColorStateList.valueOf(0x22000000), base, null)
-            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = px(8) }
-            setOnClickListener { click() }
-        }
-        fun card(title: String, hint: String? = null): LinearLayout {
-            val inner = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                background = rounded(CARD)
-                elevation = px(1).toFloat()
-                setPadding(px(16), px(14), px(16), px(16))
-            }
-            inner.addView(text(title, 17f).apply { setTypeface(typeface, Typeface.BOLD) })
-            if (hint != null) inner.addView(text(hint, 12f, MUTED))
-            column.addView(inner, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = px(12) })
-            return inner
-        }
-        fun statusLine() = text("", 14f).apply { setTypeface(typeface, Typeface.BOLD) }
 
-        column.addView(
-            text(
-                "在手機上直接執行 fishing-mvp 偵測：MediaProjection 擷取畫面、無障礙服務送出點擊。",
-                13f, MUTED,
-            ).apply { setPadding(px(4), 0, px(4), px(10)) },
+    private fun outlined(value: String, size: Float, widthDp: Int = 4) = OutlinedTextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(Color.WHITE)
+        setTypeface(typeface, Typeface.BOLD)
+        outlineColor = OUTLINE
+        outlineWidthPx = px(widthDp).toFloat()
+        gravity = Gravity.CENTER
+        setPadding(px(widthDp), px(2), px(widthDp), px(2))
+    }
+
+    private fun styleButton(button: Button, kind: Kind, enabled: Boolean = true) {
+        val (face, edge, ink) = when {
+            !enabled -> Triple(LOCKED, LOCKED_EDGE, MUTED)
+            kind == Kind.PRIMARY -> Triple(ORANGE, ORANGE_EDGE, INK)
+            kind == Kind.DANGER -> Triple(RED, RED_EDGE, Color.WHITE)
+            else -> Triple(BLUE, BLUE_EDGE, Color.WHITE)
+        }
+        button.isEnabled = enabled
+        button.setTextColor(ink)
+        button.background = RippleDrawable(
+            ColorStateList.valueOf(0x33FFFFFF), chunky(face, edge, 16), rounded(Color.WHITE, radius = 16),
         )
+    }
 
-        val safety = card("預設 Dry-run（安全模式）")
-        safety.background = rounded(Color.parseColor("#E6F4EA"))
-        safety.elevation = 0f
-        safety.addView(text("只記錄提案，不會點擊。要在懸浮視窗明確打開 LIVE 才會實際點擊，且每輪結束後自動關回。", 13f, OK))
+    private fun button(value: String, kind: Kind, click: () -> Unit) = Button(this).apply {
+        text = value
+        setAllCaps(false)
+        textSize = 16f
+        setTypeface(typeface, Typeface.BOLD)
+        stateListAnimator = null
+        minHeight = px(52)
+        minimumHeight = px(52)
+        setPadding(px(16), px(8), px(16), px(12))
+        layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = px(10) }
+        setOnClickListener { click() }
+        styleButton(this, kind)
+    }
 
-        val perms = card("1　權限")
+    private fun statusLine() = text("", 15f, MUTED, bold = true)
+
+    /** One wizard page: a title, an explanation, then whatever the caller adds. */
+    private fun page(index: Int, title: String, hint: String): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(text("${index + 1}　$title", 20f, INK, bold = true))
+            addView(text(hint, 14f, MUTED).apply { setPadding(0, px(2), 0, px(8)) })
+        }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(px(16), px(12), px(16), px(24))
+        }
+
+        // Header banner
+        val banner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = chunky(RED, RED_EDGE, 20, depthDp = 6)
+            setPadding(px(16), px(14), px(16), px(22))
+        }
+        banner.addView(outlined("Fishing MVP", 30f, widthDp = 5))
+        banner.addView(text("Android 原型 · 一步一步設定", 13f, Color.WHITE).apply { gravity = Gravity.CENTER })
+        column.addView(banner, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = px(14) })
+
+        // Progress dots joined by connectors
+        val dotViews = mutableListOf<TextView>()
+        val connectorViews = mutableListOf<View>()
+        val progress = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        repeat(STEP_COUNT) { i ->
+            val dot = TextView(this).apply {
+                gravity = Gravity.CENTER
+                textSize = 15f
+                setTypeface(typeface, Typeface.BOLD)
+                layoutParams = LinearLayout.LayoutParams(px(38), px(38))
+            }
+            dotViews += dot
+            progress.addView(dot)
+            if (i < LAST_STEP) {
+                val line = View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, px(5), 1f).apply {
+                        leftMargin = px(4)
+                        rightMargin = px(4)
+                    }
+                }
+                connectorViews += line
+                progress.addView(line)
+            }
+        }
+        dots = dotViews
+        connectors = connectorViews
+        column.addView(progress, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = px(14) })
+
+        // Step 1: overlay permission
+        val overlayPage = page(0, STEP_NAMES[0], "控制視窗要浮在遊戲畫面上面，所以需要這個權限。")
         overlayStatus = statusLine()
-        perms.addView(overlayStatus)
-        perms.addView(button("開啟「顯示在其他應用程式上層」", primary = false) {
+        overlayPage.addView(overlayStatus)
+        overlayPage.addView(button("前往設定", Kind.PRIMARY) {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         })
-        a11yStatus = statusLine().apply { setPadding(0, px(14), 0, px(4)) }
-        perms.addView(a11yStatus)
-        perms.addView(button("開啟無障礙設定", primary = false) {
+
+        // Step 2: accessibility service
+        val a11yPage = page(
+            1, STEP_NAMES[1],
+            "用來確認目前前景是哪個 App，並在 LIVE 時送出點擊。不會讀取或上傳畫面以外的內容。",
+        )
+        a11yStatus = statusLine()
+        a11yPage.addView(a11yStatus)
+        a11yPage.addView(button("前往無障礙設定", Kind.PRIMARY) {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
-        perms.addView(text("在清單中找到「Fishing MVP 點擊服務」並啟用。", 12f, MUTED))
+        a11yPage.addView(text("在清單找到「Fishing MVP 點擊服務」並啟用。Android 13 以上若顯示「受限設定」，先到 App 資訊 → ⋮ → 允許受限設定。", 12f, MUTED))
 
-        val width = card("2　擷取寬度", "越小 QTE 延遲越低，但細節越少")
+        // Step 3: capture width (+ optional self test)
+        val widthPage = page(2, STEP_NAMES[2], "擷取寬度越小，QTE 延遲越低，但細節越少。")
         val group = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         val current = Prefs.captureWidth(this)
         Prefs.CAPTURE_WIDTHS.forEach { value ->
             group.addView(RadioButton(this).apply {
                 id = View.generateViewId()
                 text = "${value}px"
+                textSize = 16f
+                setTextColor(INK)
+                buttonTintList = ColorStateList.valueOf(ORANGE_EDGE)
                 isChecked = value == current
                 setPadding(px(4), px(8), px(16), px(8))
                 setOnCheckedChangeListener { _, checked -> if (checked) Prefs.setCaptureWidth(this@MainActivity, value) }
             })
         }
-        width.addView(group)
-
-        val start = card("3　開始", "先授權擷取，切到遊戲後在懸浮視窗按「開始」；會以當下前景的 App 為目標")
-        serviceStatus = statusLine()
-        start.addView(serviceStatus)
-        start.addView(button("授權螢幕擷取並顯示懸浮視窗", primary = true) { requestCapture() })
-        start.addView(button("結束擷取服務", primary = false) {
-            startService(Intent(this, AutomationService::class.java).setAction(AutomationService.ACTION_SHUTDOWN))
-        })
-
-        val test = card("偵測器自我測試", "不需要遊戲；確認 Python／OpenCV 能在這支手機上運作")
+        widthPage.addView(group)
+        widthPage.addView(text("進階：偵測器自我測試", 15f, INK, bold = true).apply { setPadding(0, px(14), 0, 0) })
+        widthPage.addView(text("不需要遊戲；確認 Python／OpenCV 能在這支手機上運作。", 12f, MUTED))
         val selfTestOutput = text("", 11f, INK).apply {
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
-            background = rounded(CODE_BG, radius = 8)
+            background = rounded(CODE_BG, radius = 8, strokeDp = 0)
             setPadding(px(10), px(8), px(10), px(8))
             visibility = View.GONE
             layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = px(10) }
         }
-        test.addView(button("執行自我測試", primary = false) {
+        widthPage.addView(button("執行自我測試", Kind.SECONDARY) {
             selfTestOutput.visibility = View.VISIBLE
             selfTestOutput.text = "執行中…（第一次載入 OpenCV 需要幾秒）"
             Thread {
@@ -167,24 +299,57 @@ class MainActivity : Activity() {
                 runOnUiThread { selfTestOutput.text = result }
             }.start()
         })
-        test.addView(selfTestOutput)
-
-        column.addView(
+        widthPage.addView(selfTestOutput)
+        widthPage.addView(
             text(
                 "紀錄位置：${AutomationService.sessionsRoot(this).absolutePath}\n" +
                     "自訂設定（可選）：${AutomationService.userConfig(this).absolutePath}",
                 11f, MUTED,
-            ).apply { setPadding(px(4), px(4), px(4), 0) },
+            ).apply { setPadding(0, px(10), 0, 0) },
         )
+
+        // Step 4: start
+        val startPage = page(3, STEP_NAMES[3], "權限都齊了。授權螢幕擷取後會出現懸浮控制視窗。")
+        serviceStatus = statusLine()
+        startPage.addView(serviceStatus)
+        startPage.addView(text("① 按下面的按鈕授權擷取\n② 切到遊戲\n③ 在懸浮視窗打開「自動釣魚」開關，會以當下前景的 App 為目標", 14f, INK))
+        startPage.addView(
+            text("預設 Dry-run：只記錄提案，不會點擊。要在懸浮視窗明確打開 LIVE 才會實際點擊，且每輪結束後自動關回。", 13f, OK, bold = true)
+                .apply { setPadding(0, px(8), 0, px(4)) },
+        )
+        startPage.addView(button("授權螢幕擷取並顯示懸浮視窗", Kind.PRIMARY) { requestCapture() })
+        startPage.addView(button("結束擷取服務", Kind.DANGER) {
+            startService(Intent(this, AutomationService::class.java).setAction(AutomationService.ACTION_SHUTDOWN))
+        })
+
+        // Cream panel holding whichever step is shown
+        val allPanels = listOf(overlayPage, a11yPage, widthPage, startPage)
+        panels = allPanels
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(PANEL, OUTLINE, 22, strokeDp = 4)
+            setPadding(px(18), px(16), px(18), px(18))
+        }
+        allPanels.forEach { card.addView(it) }
+        column.addView(card, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = px(14) })
+
+        // Back / Next
+        val nav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        prevButton = button("上一步", Kind.SECONDARY) { goTo(shownStep - 1) }
+        nextButton = button("下一步", Kind.PRIMARY) { goTo(shownStep + 1) }
+        nav.addView(prevButton, LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = px(6) })
+        nav.addView(nextButton, LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = px(6) })
+        column.addView(nav)
+        gateHint = text("", 13f, Color.WHITE, bold = true).apply { gravity = Gravity.CENTER }
+        column.addView(gateHint)
 
         setContentView(
             ScrollView(this).apply {
-                setBackgroundColor(BG)
+                background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(SKY_TOP, SKY_BOTTOM))
                 clipToPadding = false
+                isFillViewport = true
                 addView(column)
-                // targetSdk 35 is edge-to-edge: content starts under the status bar and action bar.
-                // The top inset already includes the action bar; the bottom keeps the last card
-                // clear of the gesture bar.
+                // targetSdk 35 is edge-to-edge: keep content clear of the status and gesture bars.
                 setOnApplyWindowInsetsListener { v, insets ->
                     @Suppress("DEPRECATION")
                     v.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
@@ -192,6 +357,10 @@ class MainActivity : Activity() {
                 }
             },
         )
+
+        lastOverlayOk = Settings.canDrawOverlays(this)
+        lastA11yOk = TapAccessibilityService.instance != null
+        shownStep = if (AutomationService.isRunning) LAST_STEP else minOf(2, unlockedStep())
 
         if (intent?.getBooleanExtra("run_self_test", false) == true) {
             // adb shell am start -n <pkg>/.MainActivity --ez run_self_test true
@@ -203,11 +372,29 @@ class MainActivity : Activity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
         }
+        refresh()
     }
 
     override fun onResume() {
         super.onResume()
-        refresh()
+        handler.post(poll)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(poll)
+        super.onPause()
+    }
+
+    /** Furthest step the user may be on given the current permissions. */
+    private fun unlockedStep(): Int = when {
+        !Settings.canDrawOverlays(this) -> 0
+        TapAccessibilityService.instance == null -> 1
+        else -> LAST_STEP
+    }
+
+    private fun goTo(step: Int) {
+        shownStep = step.coerceIn(0, unlockedStep())
+        render()
     }
 
     private fun setStatus(view: TextView, color: Int, message: String) {
@@ -216,20 +403,63 @@ class MainActivity : Activity() {
     }
 
     private fun refresh() {
-        if (Settings.canDrawOverlays(this)) {
-            setStatus(overlayStatus, OK, "✓ 懸浮視窗權限已允許")
-        } else {
-            setStatus(overlayStatus, BAD, "✗ 尚未允許懸浮視窗")
-        }
+        val overlayOk = Settings.canDrawOverlays(this)
+        val a11yConnected = TapAccessibilityService.instance != null
+        setStatus(
+            overlayStatus,
+            if (overlayOk) OK else BAD,
+            if (overlayOk) "✓ 懸浮視窗權限已允許" else "✗ 尚未允許懸浮視窗",
+        )
         when {
-            TapAccessibilityService.instance != null -> setStatus(a11yStatus, OK, "✓ 無障礙點擊服務已連線")
-            isAccessibilityEnabled() -> setStatus(a11yStatus, WARN, "… 無障礙服務已啟用，等待連線")
+            a11yConnected -> setStatus(a11yStatus, OK, "✓ 無障礙點擊服務已連線")
+            isAccessibilityEnabled() -> setStatus(a11yStatus, WARN, "… 已啟用，等待連線")
             else -> setStatus(a11yStatus, BAD, "✗ 尚未啟用無障礙點擊服務")
         }
         if (AutomationService.isRunning) {
             setStatus(serviceStatus, OK, "● 擷取服務執行中")
         } else {
             setStatus(serviceStatus, MUTED, "○ 擷取服務未啟動")
+        }
+
+        // Move on by itself the moment the current step's requirement is met.
+        if (overlayOk && !lastOverlayOk && shownStep == 0) shownStep = 1
+        if (a11yConnected && !lastA11yOk && shownStep == 1) shownStep = 2
+        lastOverlayOk = overlayOk
+        lastA11yOk = a11yConnected
+        // A permission revoked later sends the user back to its step.
+        shownStep = shownStep.coerceAtMost(unlockedStep())
+        render()
+    }
+
+    private fun render() {
+        val unlocked = unlockedStep()
+        panels.forEachIndexed { i, panel -> panel.visibility = if (i == shownStep) View.VISIBLE else View.GONE }
+        dots.forEachIndexed { i, dot ->
+            val (face, label) = when {
+                i < shownStep -> OK to "✓"
+                i == shownStep -> ORANGE to "${i + 1}"
+                else -> LOCKED to "${i + 1}"
+            }
+            dot.text = label
+            dot.setTextColor(if (i == shownStep) INK else Color.WHITE)
+            dot.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(face)
+                setStroke(px(3), OUTLINE)
+            }
+        }
+        connectors.forEachIndexed { i, line ->
+            line.background = rounded(if (i < shownStep) OK else LOCKED, OUTLINE, 3, strokeDp = 1)
+        }
+        prevButton.visibility = if (shownStep > 0) View.VISIBLE else View.INVISIBLE
+        styleButton(prevButton, Kind.SECONDARY)
+        nextButton.visibility = if (shownStep < LAST_STEP) View.VISIBLE else View.INVISIBLE
+        val canAdvance = shownStep < unlocked
+        styleButton(nextButton, Kind.PRIMARY, enabled = canAdvance)
+        gateHint.text = when {
+            shownStep < LAST_STEP && !canAdvance && shownStep == 0 -> "先允許懸浮視窗才能繼續"
+            shownStep < LAST_STEP && !canAdvance && shownStep == 1 -> "先啟用無障礙服務才能繼續"
+            else -> ""
         }
     }
 
@@ -240,9 +470,10 @@ class MainActivity : Activity() {
     }
 
     private fun requestCapture() {
+        // The wizard already gates on this, but a permission can be revoked while the page is open.
         val problem = when {
             !Settings.canDrawOverlays(this) -> "請先允許懸浮視窗"
-            !isAccessibilityEnabled() -> "請先啟用無障礙點擊服務"
+            TapAccessibilityService.instance == null -> "請先啟用無障礙點擊服務"
             else -> null
         }
         if (problem != null) {

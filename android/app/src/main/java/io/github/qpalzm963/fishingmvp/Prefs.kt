@@ -6,7 +6,6 @@ import android.content.Context
 object Prefs {
     private const val NAME = "fishing_mvp"
     private const val KEY_CAPTURE_WIDTH = "capture_width"
-    private const val KEY_ROUNDS = "rounds"
 
     /** Capture widths offered in the UI; smaller = lower QTE latency, less detail. */
     val CAPTURE_WIDTHS = intArrayOf(540, 720, 1080)
@@ -19,11 +18,5 @@ object Prefs {
 
     fun setCaptureWidth(context: Context, value: Int) {
         prefs(context).edit().putInt(KEY_CAPTURE_WIDTH, value).apply()
-    }
-
-    fun rounds(context: Context): Int = prefs(context).getInt(KEY_ROUNDS, 1).coerceIn(1, 999)
-
-    fun setRounds(context: Context, value: Int) {
-        prefs(context).edit().putInt(KEY_ROUNDS, value.coerceIn(1, 999)).apply()
     }
 }

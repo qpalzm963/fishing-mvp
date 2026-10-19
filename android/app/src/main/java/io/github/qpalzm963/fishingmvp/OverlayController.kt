@@ -16,15 +16,16 @@ import android.widget.Switch
 import android.widget.TextView
 
 /**
- * Small draggable floating panel: rounds (1–999), Dry-run/LIVE switch,
- * Start/Stop and a status line.  The window is not focusable so it never
+ * Small draggable floating panel: a run switch (on = start, off = stop), the
+ * Dry-run/LIVE switch and a status line.  The window is not focusable so it never
  * steals input focus from the game, and taps inside its bounds are refused.
  * LIVE resets to off after every session.
  */
 @SuppressLint("SetTextI18n", "UseSwitchCompatOrMaterialCode")
 class OverlayController(
     private val context: Context,
-    private val onStart: (rounds: Int, live: Boolean) -> Unit,
+    /** Returns false when the session could not start, so the run switch snaps back off. */
+    private val onStart: (live: Boolean) -> Boolean,
     private val onStop: () -> Unit,
     private val onClose: () -> Unit,
 ) {
@@ -45,13 +46,11 @@ class OverlayController(
     var bounds: Rect? = null
         private set
 
-    private var rounds = Prefs.rounds(context)
     private var shown = false
+    private var settingRunning = false
     private val root: LinearLayout
-    private val roundsView: TextView
+    private val runSwitch: Switch
     private val liveSwitch: Switch
-    private val startButton: Button
-    private val stopButton: Button
     private val statusView: TextView
 
     init {
@@ -91,23 +90,6 @@ class OverlayController(
         header.addView(button("✕") { onClose() })
         root.addView(header)
 
-        val roundsRow = row()
-        roundsRow.addView(label("輪數 "))
-        roundsView = label(rounds.toString(), 15f).apply {
-            minWidth = px(36)
-            gravity = Gravity.CENTER
-        }
-        val minus = button("−") { setRounds(rounds - 1) }.apply {
-            setOnLongClickListener { setRounds(rounds - 10); true }
-        }
-        val plus = button("+") { setRounds(rounds + 1) }.apply {
-            setOnLongClickListener { setRounds(rounds + 10); true }
-        }
-        roundsRow.addView(minus)
-        roundsRow.addView(roundsView)
-        roundsRow.addView(plus)
-        root.addView(roundsRow)
-
         liveSwitch = Switch(context).apply {
             text = "實機點擊 LIVE"
             setTextColor(Color.LTGRAY)
@@ -117,27 +99,27 @@ class OverlayController(
             }
         }
         root.addView(liveSwitch)
-
-        val controls = row()
-        startButton = button("開始") {
-            Prefs.setRounds(context, rounds)
-            onStart(rounds, liveSwitch.isChecked)
+        // The run switch sits above LIVE and reads it at the moment it is switched on.
+        runSwitch = Switch(context).apply {
+            text = "自動釣魚"
+            setTextColor(Color.WHITE)
+            isChecked = false
+            setOnCheckedChangeListener { _, checked ->
+                if (settingRunning) return@setOnCheckedChangeListener
+                if (checked) {
+                    if (!onStart(liveSwitch.isChecked)) setRunning(false)
+                } else {
+                    onStop()
+                }
+            }
         }
-        stopButton = button("停止") { onStop() }.apply { isEnabled = false }
-        controls.addView(startButton)
-        controls.addView(stopButton)
-        root.addView(controls)
+        root.addView(runSwitch, root.indexOfChild(liveSwitch))
 
         statusView = label("", 12f).apply { maxWidth = px(220) }
         root.addView(statusView)
 
         handle.setOnTouchListener(DragListener())
         root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateBounds() }
-    }
-
-    private fun setRounds(value: Int) {
-        rounds = value.coerceIn(1, 999)
-        roundsView.text = rounds.toString()
     }
 
     private fun updateBounds() {
@@ -171,8 +153,9 @@ class OverlayController(
     }
 
     fun setRunning(running: Boolean) {
-        startButton.isEnabled = !running
-        stopButton.isEnabled = running
+        settingRunning = true
+        runSwitch.isChecked = running
+        settingRunning = false
         liveSwitch.isEnabled = !running
         if (!running) liveSwitch.isChecked = false // back to dry-run after every session
     }

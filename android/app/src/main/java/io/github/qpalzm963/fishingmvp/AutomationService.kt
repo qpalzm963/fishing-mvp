@@ -56,6 +56,9 @@ class AutomationService : Service() {
         private const val NOTIFICATION_ID = 42
         private const val NO_FRAME_TIMEOUT_MS = 5000L
 
+        /** No user-set round count: run until stopped, capped by the session's own 1–999 limit. */
+        private const val MAX_ROUNDS = 999
+
         @Volatile
         var isRunning = false
             private set
@@ -171,24 +174,25 @@ class AutomationService : Service() {
     }
 
     // ------------------------------------------------------------ session
-    private fun startSession(rounds: Int, live: Boolean) {
-        if (sessionActive) return
+    private fun startSession(live: Boolean): Boolean {
+        if (sessionActive) return false
         val a11y = TapAccessibilityService.instance
         when {
-            a11y == null -> { overlay?.setStatus("請先開啟無障礙服務（前景檢查與點擊都需要）"); return }
-            imageReader == null -> { overlay?.setStatus("尚未取得螢幕擷取權限"); return }
+            a11y == null -> { overlay?.setStatus("請先開啟無障礙服務（前景檢查與點擊都需要）"); return false }
+            imageReader == null -> { overlay?.setStatus("尚未取得螢幕擷取權限"); return false }
         }
         // Manual trigger: the app in the foreground when Start is pressed becomes this session's
         // locked target (the overlay is a system window and is ignored by the lookup).
         val target = a11y!!.refreshForeground()
         if (target == null || a11y.isNonGamePackage(target)) {
-            overlay?.setStatus("請先切到遊戲再按開始\n目前前景：${target ?: "未知"}")
-            return
+            overlay?.setStatus("請先切到遊戲再打開開關\n目前前景：${target ?: "未知"}")
+            return false
         }
         stopRequested = false
         sessionActive = true
         overlay?.setRunning(true)
-        python.execute { runSession(target, rounds, live) }
+        python.execute { runSession(target, MAX_ROUNDS, live) }
+        return true
     }
 
     private fun requestStop() {
@@ -305,7 +309,7 @@ class AutomationService : Service() {
             mainHandler.post {
                 overlay?.setRunning(false)
                 overlay?.setStatus(
-                    "已停止：$reason（完成 $done/$rounds）" + (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
+                    "已停止：$reason（完成 $done 輪）" + (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
                 )
             }
         }
@@ -315,7 +319,7 @@ class AutomationService : Service() {
         val text = buildString {
             append(if (live) "LIVE" else "DRY-RUN")
             append(" · ").append(result.optString("state"))
-            append(" · ").append(result.optInt("completed_rounds")).append('/').append(result.optInt("max_rounds"))
+            append(" · 已完成 ").append(result.optInt("completed_rounds")).append(" 輪")
             if (!result.isNull("analysis_ms")) append(" · ").append(result.optDouble("analysis_ms").toInt()).append("ms")
             val action = result.optJSONObject("action")
             if (action != null) append(if (result.optBoolean("sent")) "\n點擊：" else "\n提案：").append(action.optString("reason"))
