@@ -3,6 +3,8 @@ package io.github.qpalzm963.fishingmvp
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -33,6 +35,7 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONObject
 
 /** White text with a thick dark outline, like the game's banner lettering. */
 private class OutlinedTextView(context: Context) : TextView(context) {
@@ -282,7 +285,8 @@ class MainActivity : Activity() {
         widthPage.addView(group)
         widthPage.addView(text("進階：偵測器自我測試", 15f, INK, bold = true).apply { setPadding(0, px(14), 0, 0) })
         widthPage.addView(text("不需要遊戲；確認 Python／OpenCV 能在這支手機上運作。", 12f, MUTED))
-        val selfTestOutput = text("", 11f, INK).apply {
+        var selfTestRaw = ""
+        val selfTestOutput = text("", 12f, INK).apply {
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
             background = rounded(CODE_BG, radius = 8, strokeDp = 0)
@@ -290,23 +294,27 @@ class MainActivity : Activity() {
             visibility = View.GONE
             layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = px(10) }
         }
+        val copyButton = button("複製完整結果", Kind.SECONDARY) {
+            val clipboard = getSystemService(ClipboardManager::class.java)
+            clipboard.setPrimaryClip(ClipData.newPlainText("self test", selfTestRaw))
+            Toast.makeText(this, "已複製完整結果", Toast.LENGTH_SHORT).show()
+        }.apply { visibility = View.GONE }
         widthPage.addView(button("執行自我測試", Kind.SECONDARY) {
             selfTestOutput.visibility = View.VISIBLE
+            copyButton.visibility = View.GONE
             selfTestOutput.text = "執行中…（第一次載入 OpenCV 需要幾秒）"
             Thread {
                 val result = runCatching { SelfTest.run(applicationContext) }
                     .getOrElse { "失敗：${it.javaClass.simpleName}: ${it.message}" }
-                runOnUiThread { selfTestOutput.text = result }
+                runOnUiThread {
+                    selfTestRaw = result
+                    selfTestOutput.text = summarizeSelfTest(result)
+                    copyButton.visibility = View.VISIBLE
+                }
             }.start()
         })
         widthPage.addView(selfTestOutput)
-        widthPage.addView(
-            text(
-                "紀錄位置：${AutomationService.sessionsRoot(this).absolutePath}\n" +
-                    "自訂設定（可選）：${AutomationService.userConfig(this).absolutePath}",
-                11f, MUTED,
-            ).apply { setPadding(0, px(10), 0, 0) },
-        )
+        widthPage.addView(copyButton)
 
         // Step 4: start
         val startPage = page(3, STEP_NAMES[3], "權限都齊了。授權螢幕擷取後會出現懸浮控制視窗。")
@@ -460,6 +468,35 @@ class MainActivity : Activity() {
             shownStep < LAST_STEP && !canAdvance && shownStep == 0 -> "先允許懸浮視窗才能繼續"
             shownStep < LAST_STEP && !canAdvance && shownStep == 1 -> "先啟用無障礙服務才能繼續"
             else -> ""
+        }
+    }
+
+    /** Compact view of the self-test JSON; the raw report stays available through the copy button. */
+    private fun summarizeSelfTest(raw: String): String {
+        val report = runCatching { JSONObject(raw) }.getOrNull() ?: return raw.take(300)
+        val bridge = report.optJSONObject("bridge")
+        val bridgeOk = report.optBoolean("bridge_ok")
+        val allOk = report.optBoolean("ok") && bridgeOk
+        return buildString {
+            append(if (allOk) "✓ 全部通過" else "✗ 有項目失敗")
+            append("（%.1f 秒）\n".format(report.optLong("self_test_ms") / 1000.0))
+            append("Python ${report.optString("python")} · numpy ${report.optString("numpy")}\n")
+            append("OpenCV ${report.optString("opencv")} · ${report.optString("machine")}\n\n")
+            val frames = report.optJSONArray("frames")
+            for (i in 0 until (frames?.length() ?: 0)) {
+                val frame = frames!!.getJSONObject(i)
+                val name = frame.optString("name")
+                val ok = frame.optString("hint") == name
+                append(name.padEnd(9)).append(if (ok) "✓ " else "✗ ")
+                when {
+                    frame.has("error") -> append(frame.optString("error").take(60))
+                    ok -> append("${frame.optDouble("analysis_ms_max").toInt()} ms")
+                    else -> append("判成 ${frame.optString("hint")}")
+                }
+                append('\n')
+            }
+            append("影像橋接".padEnd(7)).append(if (bridgeOk) "✓ " else "✗ ")
+            if (bridge != null) append("${bridge.optInt("frames")} 幀 ${bridge.optLong("total_ms")} ms")
         }
     }
 

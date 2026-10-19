@@ -274,11 +274,11 @@ App 內的「執行自我測試」不需要遊戲：會在手機上用 5 張 fix
 3. 確認紀錄合理後，打開「實機點擊 LIVE」（文字變紅）再打開「自動釣魚」才會送出點擊。每次結束後 LIVE 會自動回到關閉。
 4. 「停止」會在下一次輸入前停止，不再送出新點擊。
 
-與 CLI 相同的安全條件：前景 package 不符、螢幕尺寸／方向改變、UNKNOWN 或階段超時、無障礙服務中斷、手勢被拒絕、MediaProjection 被系統或使用者停止時，都會停止且不再點擊。Auto Retry 等自訂設定可放在 App 主畫面顯示的 `config/user.yaml` 路徑，格式與 `--config` 相同。
+與 CLI 相同的安全條件：前景 package 不符、螢幕尺寸／方向改變、UNKNOWN 或階段超時、無障礙服務中斷、手勢被拒絕、MediaProjection 被系統或使用者停止時，都會停止且不再點擊。Auto Retry 等自訂設定可放在 App 外部儲存區 `files/` 資料夾下的 `config/user.yaml`，格式與 `--config` 相同。
 
 ### 紀錄
 
-每次開始都會在 App 外部儲存區建立 `sessions/日期時間/`（主畫面會顯示完整路徑，通常是 `/sdcard/Android/data/io.github.qpalzm963.fishingmvp/files/sessions/`），內容與 CLI live 相同：`live_detections.jsonl`、`live_summary.json`、`snapshots/`，另有 Android 端的 `android_session.json`（擷取／螢幕尺寸、機型）與 `android_events.log`。可用 `adb pull` 或檔案管理員取出。
+每次開始都會在 App 外部儲存區建立 `sessions/日期時間/`（通常是 `/sdcard/Android/data/io.github.qpalzm963.fishingmvp/files/sessions/`），內容與 CLI live 相同：`live_detections.jsonl`、`live_summary.json`、`snapshots/`，另有 Android 端的 `android_session.json`（擷取／螢幕尺寸、機型）與 `android_events.log`。可用 `adb pull` 或檔案管理員取出。
 
 ### 已知限制
 
