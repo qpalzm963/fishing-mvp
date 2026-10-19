@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
-import yaml
 
 from .config import AppConfig, load_config, validate_config
 from .debug import draw_overlay, save_snapshot
@@ -49,28 +48,6 @@ logger = logging.getLogger(__name__)
 
 SOURCE_MODE = "android_mediaprojection"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "defaults" / "default.yaml"
-
-# Button radius range for phone captures.  The shipped range (4.5%-22% of the frame width) is far
-# wider than the real control (about 9%-16%), and the Hough search cost grows with the range:
-# measured ~40% faster full analysis with unchanged states.  Applied only to fields the user's
-# own config file does not set.
-MOBILE_DETECTOR_DEFAULTS = {"button_min_radius_ratio": 0.06, "button_max_radius_ratio": 0.19}
-
-
-def _user_detector_keys(path: Path | None) -> set[str]:
-    if path is None:
-        return set()
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    detector = data.get("detector") if isinstance(data, dict) else None
-    return set(detector) if isinstance(detector, dict) else set()
-
-
-def load_mobile_config(override: Path | None = None) -> AppConfig:
-    """Shipped defaults, the phone-specific detector tweaks, then the user's own file on top."""
-
-    config = load_config(override, base_path=DEFAULT_CONFIG_PATH)
-    tweaks = {k: v for k, v in MOBILE_DETECTOR_DEFAULTS.items() if k not in _user_detector_keys(override)}
-    return replace(config, detector=replace(config.detector, **tweaks))
 
 
 class TapDispatcher(Protocol):
@@ -135,7 +112,7 @@ class MobileSession:
             raise ValueError("max_rounds must be between 1 and 999")
         if config is None:
             override = Path(config_path) if config_path and Path(config_path).is_file() else None
-            config = load_mobile_config(override)
+            config = load_config(override, base_path=DEFAULT_CONFIG_PATH)
         validate_config(config)
         if send_actions and dispatcher is None:
             raise ValueError("live mode requires a dispatcher")
@@ -555,7 +532,7 @@ def self_test(fixture_dir: str, repeats: int = 3) -> str:
 
     from .config import load_config
 
-    config = load_mobile_config()
+    config = load_config(None, base_path=DEFAULT_CONFIG_PATH)
     report: dict[str, Any] = {
         "python": platform.python_version(),
         "machine": platform.machine(),

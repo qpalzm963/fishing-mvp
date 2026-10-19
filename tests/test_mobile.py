@@ -254,17 +254,3 @@ def test_result_screen_still_gets_a_full_search_and_is_recognised(tmp_path: Path
     session.stop()
     assert results[-1]["state"] == "result"
     assert len(calls) > before, "moving to the result screen never fell back to the full search"
-
-
-def test_phone_radius_defaults_yield_to_the_users_config(tmp_path: Path) -> None:
-    user_yaml = tmp_path / "user.yaml"
-    user_yaml.write_text("detector:\n  button_max_radius_ratio: 0.21\n", encoding="utf-8")
-    sessions = [MobileSession(tmp_path / "a"), MobileSession(tmp_path / "b", config_path=user_yaml)]
-    try:
-        plain, custom = (s.config.detector for s in sessions)
-    finally:
-        for session in sessions:
-            session.stop()
-    assert (plain.button_min_radius_ratio, plain.button_max_radius_ratio) == (0.06, 0.19)
-    # The user's own value is kept; only the field they did not set gets the phone default.
-    assert (custom.button_min_radius_ratio, custom.button_max_radius_ratio) == (0.06, 0.21)
