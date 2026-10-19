@@ -234,6 +234,60 @@ H.264 decoder；失敗時回傳 exit code 2，不會嘗試連線或操作 Androi
 Live 模式先送出動作，再產生狀態切換截圖；截圖失敗會記錄警告並繼續。連線、前景、解析度或輸入錯誤仍會停止，先保存 `live_summary.json` 的 `error`、`last_state` 與 `completed_rounds`，再回傳失敗；若儲存空間本身無法寫入，會在終端報告摘要寫入失敗。摘要以暫存檔替換，避免留下半份 JSON。
 QTE 的後續影格觀測只接受輸入送出後解碼的新影格，延遲從 dispatch 結束時計算。待處理觀測在離開 QTE／QUALITY 時完成並移除，超過 `qte_timeout_s` 與 `quality_timeout_s` 中較大的值則標記 `timed_out` 並移除；歷史結果仍保留在 actions 摘要中。
 
+## Android 手機端原型（實驗性）
+
+`android/` 是不需要電腦、ADB 或 scrcpy 的 Android App 原型：手機自己以 MediaProjection 擷取畫面，透過 Chaquopy 在 App 內執行與桌面版相同的 `fishing_mvp` Python 偵測器（`src/fishing_mvp/` 原始碼直接打包，不另外改寫），再由無障礙服務（AccessibilityService `dispatchGesture`，不需 root）送出點擊。手機端的狀態機、full-auto 輪數、Auto Retry、階段 timeout 與 QTE ETA 都沿用 `src/fishing_mvp/mobile.py` 包裝的既有邏輯。
+
+目前狀態：可以建置 debug APK，Python 端有 pytest 覆蓋，**尚未在實機或模擬器上驗證**，QTE 命中率與延遲需要實機確認。
+
+### 建置
+
+需要 JDK 17、Android SDK（platform 35）與 Python 3.10（Chaquopy 的 OpenCV wheel 只提供 3.10）：
+
+```bash
+cd android
+export ANDROID_HOME=/path/to/android-sdk
+export CHAQUOPY_BUILD_PYTHON=$(command -v python3.10)   # PATH 上已有 python3.10 時可省略
+./gradlew assembleDebug
+# 輸出：android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+GitHub Actions 的 `Android APK` workflow 會在 `android/`、`src/` 變更時建置同一個 debug APK，並上傳為 artifact `fishing-mvp-android-debug`。
+
+### 安裝與權限
+
+1. 安裝 APK：`adb install app-debug.apk`，或把 APK 傳到手機後直接開啟安裝（需允許「安裝不明來源應用程式」）。
+2. 開啟 **Fishing MVP**，依畫面上的清單授權：
+   - **顯示在其他應用程式上層**：按「開啟『顯示在其他應用程式上層』設定」，允許 Fishing MVP；懸浮控制視窗需要它。
+   - **無障礙服務**：按「開啟無障礙設定」，在「已下載的應用程式」中啟用「Fishing MVP 點擊服務」。它用來判斷前景 App 並送出點擊；Android 13 以上若顯示「受限設定」，需先到「應用程式資訊 → ⋮ → 允許受限設定」。
+   - **通知**（Android 13+）：允許，以顯示擷取中的前景服務通知。
+3. 先開啟遊戲一次再回到 App，按「使用最近的前景 App」帶入遊戲 package（也可以手動輸入），按「儲存 package」。程式只會在這個 package 位於前景時處理畫面與點擊，不會替你啟動或切換 App。
+4. 選擇擷取寬度：預設 720px；540px 延遲較低但窄目標細節較少，1080px 細節最多但較慢。座標一律以 normalized 值輸出，再映射到實際螢幕尺寸。
+5. 按「授權螢幕擷取並顯示懸浮視窗」，在系統的 MediaProjection 對話框選擇**分享整個畫面**後開始。之後通知列會常駐「Fishing MVP 擷取中」，可從通知的「結束」關閉。
+
+App 內的「執行自我測試」不需要遊戲：會在手機上用 5 張 fixture 執行偵測器，顯示 Python／NumPy／OpenCV 版本、每張的辨識結果與每幀分析毫秒數，也會測試 `byte[]` 影像橋接。
+
+### 先 Dry-run，再 Live
+
+1. 切到遊戲的等待畫面，把懸浮視窗拖到不會遮住下方控制與 QTE 色帶的位置（懸浮視窗本身也會被擷取；落在懸浮視窗範圍的點擊會被拒絕並停止）。
+2. 以 `−`／`+` 設定輪數（1–999，長按一次 ±10），**保持「實機點擊 LIVE」關閉**，按「開始」。這是 Dry-run：只記錄動作提案，不會點擊。懸浮視窗會顯示狀態、完成輪數、每幀分析毫秒與最近的提案。
+3. 確認紀錄合理後，打開「實機點擊 LIVE」（文字變紅）再按「開始」才會送出點擊。每次結束後 LIVE 會自動回到關閉。
+4. 「停止」會在下一次輸入前停止，不再送出新點擊。
+
+與 CLI 相同的安全條件：前景 package 不符、螢幕尺寸／方向改變、UNKNOWN 或階段超時、無障礙服務中斷、手勢被拒絕、MediaProjection 被系統或使用者停止時，都會停止且不再點擊。Auto Retry 等自訂設定可放在 App 主畫面顯示的 `config/user.yaml` 路徑，格式與 `--config` 相同。
+
+### 紀錄
+
+每次開始都會在 App 外部儲存區建立 `sessions/日期時間/`（主畫面會顯示完整路徑，通常是 `/sdcard/Android/data/io.github.qpalzm963.fishingmvp/files/sessions/`），內容與 CLI live 相同：`live_detections.jsonl`、`live_summary.json`、`snapshots/`，另有 Android 端的 `android_session.json`（擷取／螢幕尺寸、機型）與 `android_events.log`。可用 `adb pull` 或檔案管理員取出。
+
+### 已知限制
+
+- 尚未在實機或模擬器上執行；建置環境的模擬器無法啟動，所以只驗證了建置、lint 與 Python 端測試。
+- Chaquopy 只提供 OpenCV 4.5.1（Python 3.10），桌面版要求 4.10 以上；Python 端測試另外在 Python 3.10 + OpenCV 4.5.5 + NumPy 1.26.2 下跑過，但手機上的實際行為仍需確認。
+- QTE 延遲未在實機量測：每幀需複製 RGBA 影像並在手機 CPU 上分析，30 FPS 不一定達得到；ETA 會使用實測的手勢 dispatch 延遲（包含手勢完成回呼），首次 QTE 仍以 `qte_input_latency_s` 預設值估算。
+- `tap_hold_ms: 0` 在手機端會以 10ms 的手勢送出（`dispatchGesture` 需要正值時間）。
+- 只支援固定方向；中途旋轉會停止。系統分享對話框若選「單一應用程式」，擷取內容與座標映射未經驗證。
+
 ## 設定
 
 預設設定在 [`config/default.yaml`](config/default.yaml)。設定的是 HSV／幾何／時序閾值，不是畫面上的絕對點擊位置。可複製後用 `--config` 指定：
