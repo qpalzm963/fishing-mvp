@@ -215,3 +215,56 @@ def test_auto_retry_switch_overrides_user_config(tmp_path: Path) -> None:
         for session in sessions.values():
             session.stop()
     assert enabled == {"file_only": False, "switch_on": True, "switch_off": False, "via_factory": True}
+
+
+def _count_full_button_searches(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    from fishing_mvp import vision
+
+    calls: list[int] = []
+    original = vision.detect_action_button
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(vision, "detect_action_button", counting)
+    return calls
+
+
+def test_button_is_tracked_locally_instead_of_searched_every_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The full Hough search is ~3x slower than checking around the remembered button, and it used
+    # to run on every frame outside QTE, including the first QTE frame when speed matters most.
+    clock = FakeClock()
+    calls = _count_full_button_searches(monkeypatch)
+    session = MobileSession(tmp_path, package=PACKAGE, clock=clock)
+    _feed(session, clock, _fixture("waiting.jpg"), 8)
+    session.stop()
+    assert len(calls) <= 2, f"full search ran {len(calls)} times for 8 identical frames"
+
+
+def test_result_screen_still_gets_a_full_search_and_is_recognised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Local tracking is only safe because it falls back when the button is not where it was:
+    # the result screen has no control at the old spot and must still be classified.
+    clock = FakeClock()
+    calls = _count_full_button_searches(monkeypatch)
+    session = MobileSession(tmp_path, package=PACKAGE, clock=clock)
+    _feed(session, clock, _fixture("waiting.jpg"), 6)
+    before = len(calls)
+    results = _feed(session, clock, _fixture("result.jpg"), 8)
+    session.stop()
+    assert results[-1]["state"] == "result"
+    assert len(calls) > before, "moving to the result screen never fell back to the full search"
+
+
+def test_phone_radius_defaults_yield_to_the_users_config(tmp_path: Path) -> None:
+    user_yaml = tmp_path / "user.yaml"
+    user_yaml.write_text("detector:\n  button_max_radius_ratio: 0.21\n", encoding="utf-8")
+    sessions = [MobileSession(tmp_path / "a"), MobileSession(tmp_path / "b", config_path=user_yaml)]
+    try:
+        plain, custom = (s.config.detector for s in sessions)
+    finally:
+        for session in sessions:
+            session.stop()
+    assert (plain.button_min_radius_ratio, plain.button_max_radius_ratio) == (0.06, 0.19)
+    # The user's own value is kept; only the field they did not set gets the phone default.
+    assert (custom.button_min_radius_ratio, custom.button_max_radius_ratio) == (0.06, 0.21)
