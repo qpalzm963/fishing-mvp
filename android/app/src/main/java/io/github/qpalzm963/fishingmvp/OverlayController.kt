@@ -54,6 +54,9 @@ class OverlayController(
     private val liveSwitch: Switch
     private val statusView: TextView
     private val statsView: TextView
+    private val statsHeader: TextView
+    private var statsExpanded = Prefs.statsExpanded(context)
+    private var statsSummary = ""
 
     init {
         val dp = context.resources.displayMetrics.density
@@ -121,6 +124,18 @@ class OverlayController(
         statusView = label("", 12f).apply { maxWidth = px(220) }
         root.addView(statusView)
 
+        statsHeader = label("", 12f).apply {
+            setTextColor(Color.rgb(190, 225, 255))
+            setPadding(0, px(6), 0, px(2))
+            visibility = View.GONE
+            setOnClickListener {
+                statsExpanded = !statsExpanded
+                Prefs.setStatsExpanded(context, statsExpanded)
+                renderStats()
+            }
+        }
+        root.addView(statsHeader)
+
         statsView = label("", 12f).apply {
             typeface = Typeface.MONOSPACE
             setTextColor(Color.rgb(190, 225, 255))
@@ -175,10 +190,18 @@ class OverlayController(
         statusView.text = text
     }
 
-    /** Run statistics block; an empty string hides it. */
-    fun setStats(text: String) {
+    /** Run statistics block; an empty string hides it. [summary] stays visible while it is folded. */
+    fun setStats(text: String, summary: String = "") {
         statsView.text = text
-        statsView.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+        statsSummary = summary
+        renderStats()
+    }
+
+    private fun renderStats() {
+        val has = statsView.text.isNotEmpty()
+        statsHeader.visibility = if (has) View.VISIBLE else View.GONE
+        statsHeader.text = if (statsExpanded) "▾ 執行資訊（點一下折疊）" else "▸ 執行資訊　$statsSummary"
+        statsView.visibility = if (has && statsExpanded) View.VISIBLE else View.GONE
     }
 
     private inner class DragListener : View.OnTouchListener {

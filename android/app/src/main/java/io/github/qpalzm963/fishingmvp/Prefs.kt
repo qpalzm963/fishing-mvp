@@ -6,6 +6,8 @@ import android.content.Context
 object Prefs {
     private const val NAME = "fishing_mvp"
     private const val KEY_CAPTURE_WIDTH = "capture_width"
+    private const val KEY_AUTO_RETRY = "auto_retry"
+    private const val KEY_STATS_EXPANDED = "stats_expanded"
 
     /** Capture widths offered in the UI; smaller = lower QTE latency, less detail. */
     val CAPTURE_WIDTHS = intArrayOf(540, 720, 1080)
@@ -18,5 +20,19 @@ object Prefs {
 
     fun setCaptureWidth(context: Context, value: Int) {
         prefs(context).edit().putInt(KEY_CAPTURE_WIDTH, value).apply()
+    }
+
+    /** Retry a failed round on its own; on by default. */
+    fun autoRetry(context: Context): Boolean = prefs(context).getBoolean(KEY_AUTO_RETRY, true)
+
+    fun setAutoRetry(context: Context, value: Boolean) {
+        prefs(context).edit().putBoolean(KEY_AUTO_RETRY, value).apply()
+    }
+
+    /** Whether the overlay's run statistics are unfolded. */
+    fun statsExpanded(context: Context): Boolean = prefs(context).getBoolean(KEY_STATS_EXPANDED, true)
+
+    fun setStatsExpanded(context: Context, value: Boolean) {
+        prefs(context).edit().putBoolean(KEY_STATS_EXPANDED, value).apply()
     }
 }

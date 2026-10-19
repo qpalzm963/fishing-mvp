@@ -105,6 +105,7 @@ class MobileSession:
         config: AppConfig | None = None,
         config_path: str | Path | None = None,
         dispatcher: TapDispatcher | None = None,
+        auto_retry: bool | None = None,
         clock=time.monotonic,
     ) -> None:
         if not 1 <= int(max_rounds) <= 999:
@@ -118,6 +119,9 @@ class MobileSession:
         if send_actions and not package:
             raise ValueError("live mode requires the target game package")
         config = replace(config, action=replace(config.action))
+        if auto_retry is not None:
+            # The host's switch wins over config files so the screen never disagrees with the run.
+            config = replace(config, automation=replace(config.automation, auto_retry_enabled=bool(auto_retry)))
         config.action.auto_start = True
         config.action.qte_enabled = True
         config.action.auto_continue = True
@@ -494,6 +498,7 @@ def create_session(
     package: str | None,
     config_path: str | None,
     dispatcher: TapDispatcher | None,
+    auto_retry: bool | None = None,
 ) -> MobileSession:
     """Positional factory that is convenient to call from Kotlin via Chaquopy."""
 
@@ -504,6 +509,7 @@ def create_session(
         package=package or None,
         config_path=config_path or None,
         dispatcher=dispatcher,
+        auto_retry=None if auto_retry is None else bool(auto_retry),
     )
 
 

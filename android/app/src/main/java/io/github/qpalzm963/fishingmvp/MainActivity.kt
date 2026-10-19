@@ -33,6 +33,7 @@ import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
@@ -66,7 +67,7 @@ private class OutlinedTextView(context: Context) : TextView(context) {
  * floating controls.  A step cannot be passed until its requirement is met, and
  * a permission that is revoked later sends the user back to its step.
  */
-@SuppressLint("SetTextI18n")
+@SuppressLint("SetTextI18n", "UseSwitchCompatOrMaterialCode")
 class MainActivity : Activity() {
 
     companion object {
@@ -75,7 +76,7 @@ class MainActivity : Activity() {
 
         private const val STEP_COUNT = 4
         private const val LAST_STEP = STEP_COUNT - 1
-        private val STEP_NAMES = listOf("懸浮視窗", "無障礙服務", "擷取設定", "開始")
+        private val STEP_NAMES = listOf("懸浮視窗", "無障礙服務", "運行設定", "開始")
 
         // Palette taken by eye from the game's UI: teal water, indigo outlines, candy buttons.
         private val SKY_TOP = Color.parseColor("#47B5D3")
@@ -267,7 +268,9 @@ class MainActivity : Activity() {
         a11yPage.addView(text("在清單找到「Fishing MVP 點擊服務」並啟用。Android 13 以上若顯示「受限設定」，先到 App 資訊 → ⋮ → 允許受限設定。", 12f, MUTED))
 
         // Step 3: capture width (+ optional self test)
-        val widthPage = page(2, STEP_NAMES[2], "擷取寬度越小，反應越快，但畫面細節越少。")
+        val widthPage = page(2, STEP_NAMES[2], "調整擷取畫質，以及失手後要不要自動重來。")
+        widthPage.addView(text("擷取寬度", 15f, INK, bold = true))
+        widthPage.addView(text("越小反應越快，但畫面細節越少。", 12f, MUTED))
         val group = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         val current = Prefs.captureWidth(this)
         Prefs.CAPTURE_WIDTHS.forEach { value ->
@@ -283,6 +286,19 @@ class MainActivity : Activity() {
             })
         }
         widthPage.addView(group)
+        widthPage.addView(text("自動重試", 15f, INK, bold = true).apply { setPadding(0, px(14), 0, 0) })
+        val checkedStates = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+        widthPage.addView(Switch(this).apply {
+            text = "失手後自動重來"
+            textSize = 16f
+            setTextColor(INK)
+            thumbTintList = ColorStateList(checkedStates, intArrayOf(ORANGE_EDGE, LOCKED_EDGE))
+            trackTintList = ColorStateList(checkedStates, intArrayOf(ORANGE, LOCKED))
+            isChecked = Prefs.autoRetry(this@MainActivity)
+            setPadding(0, px(8), 0, px(4))
+            setOnCheckedChangeListener { _, checked -> Prefs.setAutoRetry(this@MainActivity, checked) }
+        })
+        widthPage.addView(text("整次執行共用最多重試 3 次，用完就會停止；關閉的話，失手會直接停止。", 12f, MUTED))
         widthPage.addView(text("進階：偵測器自我測試", 15f, INK, bold = true).apply { setPadding(0, px(14), 0, 0) })
         widthPage.addView(text("不需要遊戲；確認 Python／OpenCV 能在這支手機上運作。", 12f, MUTED))
         var selfTestRaw = ""

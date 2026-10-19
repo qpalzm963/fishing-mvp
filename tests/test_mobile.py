@@ -196,3 +196,22 @@ def test_self_test_reports_fixture_hints() -> None:
     assert report["ok"] is True
     assert [item["name"] for item in report["frames"]] == ["waiting", "prompt", "qte", "quality", "result"]
     assert report["opencv"]
+
+
+def test_auto_retry_switch_overrides_user_config(tmp_path: Path) -> None:
+    # The app's switch is what the user sees, so it must win over a config file
+    # that says the opposite; otherwise the screen and the run would disagree.
+    user_yaml = tmp_path / "user.yaml"
+    user_yaml.write_text("automation:\n  auto_retry_enabled: false\n", encoding="utf-8")
+    sessions = {
+        "file_only": MobileSession(tmp_path / "a", config_path=user_yaml),
+        "switch_on": MobileSession(tmp_path / "b", config_path=user_yaml, auto_retry=True),
+        "switch_off": MobileSession(tmp_path / "c", auto_retry=False),
+        "via_factory": create_session(str(tmp_path / "d"), 1, False, None, str(user_yaml), None, True),
+    }
+    try:
+        enabled = {name: s.config.automation.auto_retry_enabled for name, s in sessions.items()}
+    finally:
+        for session in sessions.values():
+            session.stop()
+    assert enabled == {"file_only": False, "switch_on": True, "switch_off": False, "via_factory": True}

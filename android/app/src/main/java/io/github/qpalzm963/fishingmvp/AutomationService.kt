@@ -59,6 +59,14 @@ class AutomationService : Service() {
         /** No user-set round count: run until stopped, capped by the session's own 1–999 limit. */
         private const val MAX_ROUNDS = 999
 
+        fun clock(ms: Long): String {
+            val total = ms / 1000
+            return String.format(Locale.US, "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+        }
+
+        /** One-line version of the statistics, shown while the panel is folded. */
+        fun statsSummary(elapsedMs: Long, done: Int): String = "$done 輪 · ${clock(elapsedMs)}"
+
         /** Compact run statistics for the overlay panel. */
         fun statsText(elapsedMs: Long, done: Int, failed: Int, lastRoundMs: Long?): String {
             fun short(ms: Long): String {
@@ -66,9 +74,8 @@ class AutomationService : Service() {
                 return if (seconds < 60) String.format(Locale.US, "%.1f 秒", seconds)
                 else String.format(Locale.US, "%d:%02d", ms / 60000, (ms / 1000) % 60)
             }
-            val total = elapsedMs / 1000
             return listOf(
-                "執行時間  " + String.format(Locale.US, "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60),
+                "執行時間  " + clock(elapsedMs),
                 "完成輪數  $done",
                 "平均每輪  " + if (done > 0) short(elapsedMs / done) else "—",
                 "上一輪    " + (lastRoundMs?.let(::short) ?: "—"),
@@ -239,6 +246,7 @@ class AutomationService : Service() {
                     .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
                     .put("sdk", Build.VERSION.SDK_INT)
                     .put("min_tap_ms", GestureDispatcher.MIN_TAP_MS)
+                    .put("auto_retry", Prefs.autoRetry(this))
                     .toString(2)
             )
         }
@@ -269,6 +277,7 @@ class AutomationService : Service() {
                 target,
                 if (configFile.isFile) configFile.absolutePath else null,
                 dispatcher,
+                Prefs.autoRetry(this),
             )
             session.callAttr("set_device_size", screenW, screenH)
             var buffer: ByteArray? = null
@@ -321,8 +330,10 @@ class AutomationService : Service() {
                 }
                 // `attempt` advances on every success and every retry, so the surplus is failed attempts.
                 failedAttempts = maxOf(failedAttempts, result.optInt("attempt") - 1 - done)
-                val stats = statsText(SystemClock.elapsedRealtime() - startedMs, doneRounds, failedAttempts, lastRoundMs)
-                mainHandler.post { overlay?.setStats(stats) }
+                val elapsed = SystemClock.elapsedRealtime() - startedMs
+                val stats = statsText(elapsed, doneRounds, failedAttempts, lastRoundMs)
+                val summary = statsSummary(elapsed, doneRounds)
+                mainHandler.post { overlay?.setStats(stats, summary) }
                 if (result.optBoolean("stopped")) break
                 val intervalMs = (result.optDouble("next_interval_s", 0.1) * 1000).toLong()
                 val remaining = loopStart + intervalMs - SystemClock.uptimeMillis()
@@ -340,10 +351,12 @@ class AutomationService : Service() {
             val err = json?.optJSONObject("error")?.optString("message")
             event("session stop reason=$reason completed=$done error=$err dir=${dir.absolutePath}")
             sessionActive = false
-            val finalStats = statsText(SystemClock.elapsedRealtime() - startedMs, doneRounds, failedAttempts, lastRoundMs)
+            val finalElapsed = SystemClock.elapsedRealtime() - startedMs
+            val finalStats = statsText(finalElapsed, doneRounds, failedAttempts, lastRoundMs)
+            val finalSummary = statsSummary(finalElapsed, doneRounds)
             mainHandler.post {
                 overlay?.setRunning(false)
-                overlay?.setStats(finalStats)
+                overlay?.setStats(finalStats, finalSummary)
                 overlay?.setStatus(
                     "已停止：${Labels.stopReason(reason)}（完成 $done 輪）" + (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
                 )
