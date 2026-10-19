@@ -59,6 +59,23 @@ class AutomationService : Service() {
         /** No user-set round count: run until stopped, capped by the session's own 1–999 limit. */
         private const val MAX_ROUNDS = 999
 
+        /** Compact run statistics for the overlay panel. */
+        fun statsText(elapsedMs: Long, done: Int, failed: Int, lastRoundMs: Long?): String {
+            fun short(ms: Long): String {
+                val seconds = ms / 1000.0
+                return if (seconds < 60) String.format(Locale.US, "%.1f 秒", seconds)
+                else String.format(Locale.US, "%d:%02d", ms / 60000, (ms / 1000) % 60)
+            }
+            val total = elapsedMs / 1000
+            return listOf(
+                "執行時間  " + String.format(Locale.US, "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60),
+                "完成輪數  $done",
+                "平均每輪  " + if (done > 0) short(elapsedMs / done) else "—",
+                "上一輪    " + (lastRoundMs?.let(::short) ?: "—"),
+                "失手次數  $failed",
+            ).joinToString("\n")
+        }
+
         @Volatile
         var isRunning = false
             private set
@@ -190,6 +207,7 @@ class AutomationService : Service() {
         }
         stopRequested = false
         sessionActive = true
+        overlay?.setStats("")
         overlay?.setRunning(true)
         python.execute { runSession(target, MAX_ROUNDS, live) }
         return true
@@ -227,6 +245,11 @@ class AutomationService : Service() {
         event("session start live=$live rounds=$rounds package=$target")
         var summary: String? = null
         var session: PyObject? = null
+        val startedMs = SystemClock.elapsedRealtime()
+        var roundStartMs = startedMs
+        var lastRoundMs: Long? = null
+        var doneRounds = 0
+        var failedAttempts = 0
         try {
             val dispatcher = if (live) GestureDispatcher(
                 targetPackage = target,
@@ -289,6 +312,17 @@ class AutomationService : Service() {
                     ).toString()
                 )
                 postStatus(result, live, target)
+                val done = result.optInt("completed_rounds")
+                if (done > doneRounds) {
+                    val now = SystemClock.elapsedRealtime()
+                    lastRoundMs = now - roundStartMs
+                    roundStartMs = now
+                    doneRounds = done
+                }
+                // `attempt` advances on every success and every retry, so the surplus is failed attempts.
+                failedAttempts = maxOf(failedAttempts, result.optInt("attempt") - 1 - done)
+                val stats = statsText(SystemClock.elapsedRealtime() - startedMs, doneRounds, failedAttempts, lastRoundMs)
+                mainHandler.post { overlay?.setStats(stats) }
                 if (result.optBoolean("stopped")) break
                 val intervalMs = (result.optDouble("next_interval_s", 0.1) * 1000).toLong()
                 val remaining = loopStart + intervalMs - SystemClock.uptimeMillis()
@@ -306,8 +340,10 @@ class AutomationService : Service() {
             val err = json?.optJSONObject("error")?.optString("message")
             event("session stop reason=$reason completed=$done error=$err dir=${dir.absolutePath}")
             sessionActive = false
+            val finalStats = statsText(SystemClock.elapsedRealtime() - startedMs, doneRounds, failedAttempts, lastRoundMs)
             mainHandler.post {
                 overlay?.setRunning(false)
+                overlay?.setStats(finalStats)
                 overlay?.setStatus(
                     "已停止：$reason（完成 $done 輪）" + (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
                 )
@@ -319,7 +355,6 @@ class AutomationService : Service() {
         val text = buildString {
             append(if (live) "LIVE" else "DRY-RUN")
             append(" · ").append(result.optString("state"))
-            append(" · 已完成 ").append(result.optInt("completed_rounds")).append(" 輪")
             if (!result.isNull("analysis_ms")) append(" · ").append(result.optDouble("analysis_ms").toInt()).append("ms")
             val action = result.optJSONObject("action")
             if (action != null) append(if (result.optBoolean("sent")) "\n點擊：" else "\n提案：").append(action.optString("reason"))

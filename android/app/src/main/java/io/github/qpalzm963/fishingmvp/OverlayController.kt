@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.MotionEvent
@@ -52,6 +53,7 @@ class OverlayController(
     private val runSwitch: Switch
     private val liveSwitch: Switch
     private val statusView: TextView
+    private val statsView: TextView
 
     init {
         val dp = context.resources.displayMetrics.density
@@ -118,6 +120,14 @@ class OverlayController(
         statusView = label("", 12f).apply { maxWidth = px(220) }
         root.addView(statusView)
 
+        statsView = label("", 12f).apply {
+            typeface = Typeface.MONOSPACE
+            setTextColor(Color.rgb(190, 225, 255))
+            setPadding(0, px(6), 0, 0)
+            visibility = View.GONE
+        }
+        root.addView(statsView)
+
         handle.setOnTouchListener(DragListener())
         root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateBounds() }
     }
@@ -162,6 +172,12 @@ class OverlayController(
 
     fun setStatus(text: String) {
         statusView.text = text
+    }
+
+    /** Run statistics block; an empty string hides it. */
+    fun setStats(text: String) {
+        statsView.text = text
+        statsView.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
     }
 
     private inner class DragListener : View.OnTouchListener {
