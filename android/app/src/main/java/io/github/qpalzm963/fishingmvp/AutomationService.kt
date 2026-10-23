@@ -303,6 +303,13 @@ class AutomationService : Service() {
                     reused = false
                     lastNewFrameMs = SystemClock.uptimeMillis()
                 }
+                // Static UIs (common after a failed cast) may stop producing
+                // VirtualDisplay buffers. The last buffer still matches what is
+                // on screen; restamp so AttemptRecovery's freshness gate can
+                // accept a waiting/start screen instead of timing out.
+                if (reused && buffer != null) {
+                    capturedAt = System.nanoTime() / 1_000_000_000.0
+                }
                 val frame = buffer
                 if (frame == null) {
                     // Only guards the first frame: a static screen legitimately produces no
@@ -371,7 +378,7 @@ class AutomationService : Service() {
             if (!result.isNull("analysis_ms")) append(" · ").append(result.optDouble("analysis_ms").toInt()).append("ms")
             val action = result.optJSONObject("action")
             if (action != null) append(if (result.optBoolean("sent")) "\n已點擊：" else "\n打算點：").append(action.optString("reason"))
-            if (result.optBoolean("recovering")) append("\n重試復原中…")
+            if (result.optBoolean("recovering")) append("\n重試復原中…（等待可辨識的開始畫面）")
             append("\n目標：").append(target)
         }
         mainHandler.post { overlay?.setStatus(text) }

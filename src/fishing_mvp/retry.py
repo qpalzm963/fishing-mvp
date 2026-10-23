@@ -88,6 +88,13 @@ class AttemptRecovery:
                 return False
             # A reused scrcpy frame is allowed only if it was captured after
             # recovery began. Static screens do not necessarily emit new PTS.
+            safe_waiting = (
+                detection.hint == FishingState.WAITING
+                and detection.confidence >= self.config.action.min_confidence
+                and detection.action_button is not None
+                and detection.prompt_box is None
+                and detection.gauge_box is None
+            )
             fresh = detection.frame_index > self.failure_frame
             if detection.frame_decoded_s is not None:
                 fresh = fresh and detection.frame_decoded_s > self.recovering_since
@@ -95,12 +102,18 @@ class AttemptRecovery:
                 fresh = fresh and not detection.frame_reused
             if self.failure_pts is not None and detection.frame_pts_us is not None:
                 fresh = fresh and detection.frame_pts_us != self.failure_pts
-            ready = (
-                fresh and detection.hint == FishingState.WAITING
-                and detection.confidence >= self.config.action.min_confidence
-                and detection.action_button is not None
-                and detection.prompt_box is None and detection.gauge_box is None
-            )
+            # Android MediaProjection (and some emulators) may stop delivering
+            # buffers while the waiting/start UI is still on screen. After the
+            # retry delay, treat a safe reused waiting frame as current.
+            if (
+                not fresh
+                and detection.frame_reused
+                and safe_waiting
+                and elapsed >= cfg.retry_delay_ms / 1000.0
+                and detection.frame_index > self.failure_frame
+            ):
+                fresh = True
+            ready = fresh and safe_waiting
             self.waiting_frames = self.waiting_frames + 1 if ready else 0
             if (state == FishingState.WAITING
                     and self.waiting_frames >= self.config.state_machine.stable_frames
