@@ -43,6 +43,10 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The legacy `tools` package was removed from sdkmanager; requesting it
+          # fails the job before Gradle runs.
+          packages: platform-tools emulator
 
       - name: Build debug APK
         env:
