@@ -266,6 +266,13 @@ class AutomationService : Service() {
                     reused = false
                     lastNewFrameMs = SystemClock.uptimeMillis()
                 }
+                // Static UIs (common after a failed cast) may stop producing
+                // VirtualDisplay buffers. The last buffer still matches what is
+                // on screen; restamp so AttemptRecovery's freshness gate can
+                // accept a waiting/start screen instead of timing out.
+                if (reused && buffer != null) {
+                    capturedAt = System.nanoTime() / 1_000_000_000.0
+                }
                 val frame = buffer
                 if (frame == null) {
                     if (SystemClock.uptimeMillis() - lastNewFrameMs > NO_FRAME_TIMEOUT_MS) {
@@ -311,14 +318,26 @@ class AutomationService : Service() {
     private fun postStatus(result: JSONObject, live: Boolean) {
         val text = buildString {
             append(if (live) "LIVE" else "DRY-RUN")
-            append(" · ").append(result.optString("state"))
+            append(" · ").append(stateLabel(result.optString("state")))
             append(" · ").append(result.optInt("completed_rounds")).append('/').append(result.optInt("max_rounds"))
             if (!result.isNull("analysis_ms")) append(" · ").append(result.optDouble("analysis_ms").toInt()).append("ms")
             val action = result.optJSONObject("action")
             if (action != null) append(if (result.optBoolean("sent")) "\n點擊：" else "\n提案：").append(action.optString("reason"))
-            if (result.optBoolean("recovering")) append("\n重試復原中…")
+            if (result.optBoolean("recovering")) append("\n重試復原中…（等待可辨識的開始畫面）")
         }
         mainHandler.post { overlay?.setStatus(text) }
+    }
+
+    private fun stateLabel(state: String): String = when (state) {
+        "unknown" -> "無法辨識"
+        "waiting" -> "待機"
+        "prompt" -> "用力拉"
+        "casting" -> "拋竿中"
+        "qte" -> "拉條"
+        "quality" -> "評價"
+        "result" -> "結算"
+        "error" -> "錯誤"
+        else -> state
     }
 
     /** Prefer the frame's own CLOCK_MONOTONIC timestamp when it is plausible. */
