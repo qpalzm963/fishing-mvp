@@ -513,3 +513,20 @@ def test_qte_falls_back_to_decode_time_and_resets_when_clock_changes():
     assert abs(planner._predict_marker(second)[1] - 1.0) < 1e-6
     second.frame_pts_us = 100_000
     assert planner._predict_marker(second)[1] is None
+
+
+def test_prompt_hint_does_not_leave_qte_or_quality():
+    machine = FishingStateMachine(StateMachineConfig(stable_frames=1))
+    state, _ = machine.update(make_detection(0, FishingState.QTE))
+    assert state == FishingState.QTE
+    state, event = machine.update(make_detection(1, FishingState.PROMPT))
+    assert state == FishingState.QTE
+    assert event is None
+    state, _ = machine.update(make_detection(2, FishingState.QUALITY))
+    assert state == FishingState.QUALITY
+    state, event = machine.update(make_detection(3, FishingState.PROMPT))
+    assert state == FishingState.QUALITY
+    assert event is None
+    state, event = machine.update(make_detection(4, FishingState.RESULT))
+    assert state == FishingState.RESULT
+    assert event is not None and event.to_state == FishingState.RESULT

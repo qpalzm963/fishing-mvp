@@ -49,6 +49,12 @@ class FishingStateMachine:
         if raw == FishingState.CASTING and self.current in {FishingState.QTE, FishingState.QUALITY}:
             raw = self.current
 
+        # Prompt banners and purple action colour can flash while the gauge is
+        # still the real control.  A mid-QTE PROMPT flip would fire a start tap
+        # and scramble timing; keep QTE/QUALITY until the gauge truly leaves.
+        if raw == FishingState.PROMPT and self.current in {FishingState.QTE, FishingState.QUALITY}:
+            raw = self.current
+
         if (
             self.current == FishingState.RESULT
             and self.last_transition_timestamp >= 0
