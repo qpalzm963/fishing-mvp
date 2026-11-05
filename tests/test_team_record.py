@@ -32,6 +32,7 @@ def _load(name: str) -> np.ndarray:
     "team_record_banner_small.jpg",   # banner shrunk, reward coins flying over the card
     "team_record_banner_dog.jpg",     # large again, first glyph off screen
     "team_record_banner_magnet.jpg",  # small, over the faded start screen
+    "team_record_banner_purple_card.jpg",  # rarer catch: purple card instead of blue
 ])
 @pytest.mark.parametrize("width", [540, 720, 1080])
 def test_real_team_record_banner_is_detected(name: str, width: int) -> None:

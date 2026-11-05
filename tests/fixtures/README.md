@@ -39,3 +39,4 @@ Three more frames from the same phone on 2026-11-05 (17:11 and 17:14 sessions):
 - `team_record_banner_dog.jpg` — 「刷新團隊紀錄」 large, first glyph off screen
 - `team_record_banner_magnet.jpg` — 「刷新團隊紀錄！」 small
 - `personal_record_banner.jpg` — 「刷新個人紀錄！」, same lettering; must not count as a team record
+- `team_record_banner_purple_card.jpg` — 「刷新團隊紀錄！」 on a purple (rarer) catch card, 17:24 session
