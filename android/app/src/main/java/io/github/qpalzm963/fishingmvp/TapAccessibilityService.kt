@@ -23,6 +23,7 @@ class TapAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "FishingA11y"
+        private const val NULL_FOREGROUND_GRACE_MS = 2000L
 
         @Volatile
         var instance: TapAccessibilityService? = null
@@ -42,6 +43,9 @@ class TapAccessibilityService : AccessibilityService() {
 
     @Volatile
     private var cachedAtMs = 0L
+
+    /** When the window list is briefly empty, keep the last confirmed package this long. */
+    private var nullSinceMs = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -78,10 +82,25 @@ class TapAccessibilityService : AccessibilityService() {
             Log.w(TAG, "foreground lookup failed", exc)
             null
         }
-        cachedPackage = pkg
-        cachedAtMs = SystemClock.uptimeMillis()
-        if (pkg != null && pkg != packageName) lastExternalPackage = pkg
-        pkg
+        val now = SystemClock.uptimeMillis()
+        if (pkg != null) {
+            nullSinceMs = 0L
+            cachedPackage = pkg
+            cachedAtMs = now
+            if (pkg != packageName) lastExternalPackage = pkg
+        } else {
+            // Reward animations and window churn often return an empty list for a moment.
+            // Clearing the cache here used to stop the session after a round or two.
+            if (nullSinceMs == 0L) nullSinceMs = now
+            cachedAtMs = now
+            if (cachedPackage != null && now - nullSinceMs > NULL_FOREGROUND_GRACE_MS) {
+                Log.w(TAG, "foreground unknown for ${NULL_FOREGROUND_GRACE_MS}ms; clearing cache")
+                cachedPackage = null
+            } else {
+                Log.i(TAG, "foreground lookup empty; keeping ${cachedPackage ?: "none"}")
+            }
+        }
+        cachedPackage
     }
 
     private fun resolveForeground(): String? {
