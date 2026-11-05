@@ -189,6 +189,15 @@ def test_stop_requested_blocks_dispatch(tmp_path: Path) -> None:
     assert json.loads(session.finish())["stop_reason"] == "user_stop"
 
 
+def test_create_session_host_auto_retry_overrides_config_and_refills(tmp_path: Path) -> None:
+    enabled = create_session(str(tmp_path / "on"), 5, False, PACKAGE, None, None, True)
+    assert enabled.config.automation.auto_retry_enabled is True
+    assert enabled.recovery.refill_on_success is True
+    disabled = create_session(str(tmp_path / "off"), 5, False, PACKAGE, None, None, False)
+    assert disabled.config.automation.auto_retry_enabled is False
+    assert disabled.recovery.refill_on_success is True
+
+
 def test_self_test_reports_fixture_hints() -> None:
     from fishing_mvp.mobile import self_test
 
