@@ -5,7 +5,6 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -298,7 +297,7 @@ class MainActivity : Activity() {
             setPadding(0, px(8), 0, px(4))
             setOnCheckedChangeListener { _, checked -> Prefs.setAutoRetry(this@MainActivity, checked) }
         })
-        widthPage.addView(text("整次執行共用最多重試 3 次，用完就會停止；關閉的話，失手會直接停止。", 12f, MUTED))
+        widthPage.addView(text("連續失手最多重試 3 次，成功一輪會重新計算；關閉的話，失手會直接停止。", 12f, MUTED))
         widthPage.addView(text("進階：偵測器自我測試", 15f, INK, bold = true).apply { setPadding(0, px(14), 0, 0) })
         widthPage.addView(text("不需要遊戲；確認 Python／OpenCV 能在這支手機上運作。", 12f, MUTED))
         var selfTestRaw = ""
@@ -517,11 +516,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun isAccessibilityEnabled(): Boolean {
-        val expected = ComponentName(this, TapAccessibilityService::class.java).flattenToString()
-        val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
-        return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
-    }
+    private fun isAccessibilityEnabled(): Boolean = TapAccessibilityService.isEnabled(this)
 
     private fun requestCapture() {
         // The wizard already gates on this, but a permission can be revoked while the page is open.

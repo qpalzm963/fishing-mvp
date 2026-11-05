@@ -68,7 +68,7 @@ class AutomationService : Service() {
         fun statsSummary(elapsedMs: Long, done: Int): String = "$done 輪 · ${clock(elapsedMs)}"
 
         /** Compact run statistics for the overlay panel. */
-        fun statsText(elapsedMs: Long, done: Int, failed: Int, lastRoundMs: Long?): String {
+        fun statsText(elapsedMs: Long, done: Int, failed: Int, lastRoundMs: Long?, records: Int): String {
             fun short(ms: Long): String {
                 val seconds = ms / 1000.0
                 return if (seconds < 60) String.format(Locale.US, "%.1f 秒", seconds)
@@ -80,6 +80,7 @@ class AutomationService : Service() {
                 "平均每輪  " + if (done > 0) short(elapsedMs / done) else "—",
                 "上一輪    " + (lastRoundMs?.let(::short) ?: "—"),
                 "失手次數  $failed",
+                "團隊紀錄  $records",
             ).joinToString("\n")
         }
 
@@ -108,6 +109,9 @@ class AutomationService : Service() {
     @Volatile
     private var sessionActive = false
 
+    /** The overlay is showing the "accessibility not connected" message. */
+    private var a11yMissingShown = false
+
     @Volatile
     private var stopRequested = false
 
@@ -117,6 +121,10 @@ class AutomationService : Service() {
         super.onCreate()
         python = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "fishing-python") }
         if (!Python.isStarted()) Python.start(AndroidPlatform(this))
+        TapAccessibilityService.onConnected = {
+            if (a11yMissingShown && !sessionActive) overlay?.setStatus("無障礙服務已連線，可以打開開關")
+            a11yMissingShown = false
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -202,7 +210,16 @@ class AutomationService : Service() {
         if (sessionActive) return false
         val a11y = TapAccessibilityService.instance
         when {
-            a11y == null -> { overlay?.setStatus("請先開啟無障礙服務（前景檢查與點擊都需要）"); return false }
+            a11y == null -> {
+                // instance is null both when the switch is off and when the system has not (re)bound
+                // the service yet, e.g. after another accessibility client interrupted it.
+                overlay?.setStatus(
+                    if (TapAccessibilityService.isEnabled(this)) "無障礙服務已開啟但尚未連線，請稍候再試；持續如此請到設定關掉再打開"
+                    else "請先開啟無障礙服務（前景檢查與點擊都需要）"
+                )
+                a11yMissingShown = true
+                return false
+            }
             imageReader == null -> { overlay?.setStatus("尚未取得螢幕擷取權限"); return false }
         }
         // Manual trigger: the app in the foreground when Start is pressed becomes this session's
@@ -212,6 +229,7 @@ class AutomationService : Service() {
             overlay?.setStatus("請先切到遊戲再打開開關\n目前前景：${target ?: "未知"}")
             return false
         }
+        a11yMissingShown = false
         stopRequested = false
         sessionActive = true
         overlay?.setStats("")
@@ -258,6 +276,7 @@ class AutomationService : Service() {
         var lastRoundMs: Long? = null
         var doneRounds = 0
         var failedAttempts = 0
+        var teamRecords = 0
         try {
             val dispatcher = if (live) GestureDispatcher(
                 targetPackage = target,
@@ -337,8 +356,9 @@ class AutomationService : Service() {
                 }
                 // `attempt` advances on every success and every retry, so the surplus is failed attempts.
                 failedAttempts = maxOf(failedAttempts, result.optInt("attempt") - 1 - done)
+                teamRecords = result.optInt("team_records")
                 val elapsed = SystemClock.elapsedRealtime() - startedMs
-                val stats = statsText(elapsed, doneRounds, failedAttempts, lastRoundMs)
+                val stats = statsText(elapsed, doneRounds, failedAttempts, lastRoundMs, teamRecords)
                 val summary = statsSummary(elapsed, doneRounds)
                 mainHandler.post { overlay?.setStats(stats, summary) }
                 if (result.optBoolean("stopped")) break
@@ -359,7 +379,7 @@ class AutomationService : Service() {
             event("session stop reason=$reason completed=$done error=$err dir=${dir.absolutePath}")
             sessionActive = false
             val finalElapsed = SystemClock.elapsedRealtime() - startedMs
-            val finalStats = statsText(finalElapsed, doneRounds, failedAttempts, lastRoundMs)
+            val finalStats = statsText(finalElapsed, doneRounds, failedAttempts, lastRoundMs, teamRecords)
             val finalSummary = statsSummary(finalElapsed, doneRounds)
             mainHandler.post {
                 overlay?.setRunning(false)
@@ -379,6 +399,7 @@ class AutomationService : Service() {
             val action = result.optJSONObject("action")
             if (action != null) append(if (result.optBoolean("sent")) "\n已點擊：" else "\n打算點：").append(action.optString("reason"))
             if (result.optBoolean("recovering")) append("\n重試復原中…（等待可辨識的開始畫面）")
+            if (result.optBoolean("team_record")) append("\n突破團隊紀錄")
             append("\n目標：").append(target)
         }
         mainHandler.post { overlay?.setStatus(text) }
@@ -459,6 +480,7 @@ class AutomationService : Service() {
     }
 
     override fun onDestroy() {
+        TapAccessibilityService.onConnected = null
         if (isRunning) shutdown()
         python.shutdown()
         super.onDestroy()

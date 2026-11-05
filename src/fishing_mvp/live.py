@@ -292,6 +292,7 @@ def run_live(
                         timestamp_s,
                         fast=sampling_state in {FishingState.QTE, FishingState.QUALITY}
                         and not (recovery is not None and recovery.recovering),
+                        min_local_button_score=config.action.min_confidence,
                     )
                     analysis_finished_at = time.monotonic()
                     _annotate_frame_timing(

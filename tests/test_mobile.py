@@ -211,10 +211,12 @@ def test_auto_retry_switch_overrides_user_config(tmp_path: Path) -> None:
     }
     try:
         enabled = {name: s.config.automation.auto_retry_enabled for name, s in sessions.items()}
+        refill = {name: s.recovery.refill_on_success for name, s in sessions.items()}
     finally:
         for session in sessions.values():
             session.stop()
     assert enabled == {"file_only": False, "switch_on": True, "switch_off": False, "via_factory": True}
+    assert refill == {"file_only": True, "switch_on": True, "switch_off": True, "via_factory": True}
 
 
 def _count_full_button_searches(monkeypatch: pytest.MonkeyPatch) -> list[int]:
@@ -240,6 +242,44 @@ def test_button_is_tracked_locally_instead_of_searched_every_frame(tmp_path: Pat
     _feed(session, clock, _fixture("waiting.jpg"), 8)
     session.stop()
     assert len(calls) <= 2, f"full search ran {len(calls)} times for 8 identical frames"
+
+
+def test_weak_local_button_match_falls_back_to_the_full_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fishing_mvp import vision
+    from fishing_mvp.models import Box
+
+    calls = _count_full_button_searches(monkeypatch)
+
+    def weak_nearby(*args, **kwargs):
+        return Box(40, 160, 30, 30), True, 0.50, {"purple_ratio": 0.2, "saturation": 40.0}
+
+    monkeypatch.setattr(vision, "detect_action_button_nearby", weak_nearby)
+    clock = FakeClock()
+    session = MobileSession(tmp_path, package=PACKAGE, clock=clock)
+    _feed(session, clock, _fixture("waiting.jpg"), 4)
+    session.stop()
+    assert len(calls) >= 4, f"weak local matches only triggered {len(calls)} full searches"
+
+
+def test_local_match_threshold_follows_the_configured_tap_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A local match the planner would never tap must not stop the full search. With a raised tap
+    # threshold, a 0.70 local match is below it and has to fall back, or the start is never pressed.
+    from fishing_mvp import vision
+    from fishing_mvp.models import Box
+
+    calls = _count_full_button_searches(monkeypatch)
+
+    def nearby_070(*args, **kwargs):
+        return Box(40, 160, 30, 30), True, 0.70, {"purple_ratio": 0.2, "saturation": 40.0}
+
+    monkeypatch.setattr(vision, "detect_action_button_nearby", nearby_070)
+    user_yaml = tmp_path / "user.yaml"
+    user_yaml.write_text("action:\n  min_confidence: 0.75\n", encoding="utf-8")
+    clock = FakeClock()
+    session = MobileSession(tmp_path / "s", package=PACKAGE, clock=clock, config_path=user_yaml)
+    _feed(session, clock, _fixture("waiting.jpg"), 4)
+    session.stop()
+    assert len(calls) >= 4, f"0.70 local matches under a 0.75 threshold only triggered {len(calls)} full searches"
 
 
 def test_result_screen_still_gets_a_full_search_and_is_recognised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

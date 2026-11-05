@@ -89,6 +89,114 @@ def test_sent_start_retries_only_from_a_confirmed_safe_waiting_screen():
     assert controller.progress.start_allowed
 
 
+def test_slow_cast_after_unconfirmed_start_resumes_the_round():
+    """The start button can linger after a real cast. Prompt or the gauge means it worked."""
+    controller = recovery()
+    observe(controller, FishingState.WAITING, 0)
+    controller.record_start_action(
+        observation(FishingState.WAITING, 0), Action(ActionType.TAP, x=50, y=170), "accessibility_gesture", 0.0,
+    )
+    assert observe(controller, FishingState.WAITING, 8.0)
+    assert controller.recovering
+    observe(controller, FishingState.PROMPT, 9.0)
+    assert not controller.recovering
+    assert controller.progress.stop_reason is None
+    assert controller.retries == 0
+    assert controller.start_action is None
+    assert controller.events[-1]["decision"] == "start_confirmed"
+    observe(controller, FishingState.QTE, 12.0)
+    observe(controller, FishingState.QTE, 20.0)
+    assert not controller.recovering
+    assert controller.progress.stop_reason is None
+
+
+def test_stable_result_dialog_during_a_miss_can_be_dismissed():
+    controller = recovery()
+    assert miss(controller)
+    observe(controller, FishingState.RESULT, 0.4)
+    assert controller.recovering
+    observe(controller, FishingState.RESULT, 2.0)
+    assert not controller.recovering
+    assert controller.progress.completed_rounds == 0
+    assert controller.events[-1]["decision"] == "result_during_recovery"
+
+
+def test_brief_return_to_the_start_button_does_not_abandon_the_cast():
+    controller = recovery()
+    observe(controller, FishingState.PROMPT, 0)
+    observe(controller, FishingState.WAITING, 0.4)
+    assert not controller.recovering
+    observe(controller, FishingState.CASTING, 0.9)
+    assert not controller.recovering
+    assert controller.progress.stop_reason is None
+
+
+def test_a_cast_that_continues_after_a_settled_gap_is_resumed():
+    controller = recovery()
+    observe(controller, FishingState.PROMPT, 0)
+    observe(controller, FishingState.WAITING, 0.1)
+    assert not controller.recovering
+    assert observe(controller, FishingState.WAITING, 1.6)
+    assert controller.recovering
+    assert controller.events[-1]["failure_reason"] == "attempt_incomplete"
+    observe(controller, FishingState.CASTING, 2.0)
+    assert not controller.recovering
+    assert controller.events[-1]["decision"] == "round_resumed"
+    assert controller.progress.stop_reason is None
+
+
+def test_stable_result_after_an_incomplete_cast_can_be_dismissed():
+    controller = recovery()
+    observe(controller, FishingState.PROMPT, 0)
+    observe(controller, FishingState.WAITING, 0.1)
+    assert observe(controller, FishingState.WAITING, 1.6)
+    observe(controller, FishingState.RESULT, 1.8)
+    assert controller.recovering
+    observe(controller, FishingState.RESULT, 3.4)
+    assert not controller.recovering
+    assert controller.events[-1]["decision"] == "result_during_recovery"
+    assert controller.progress.completed_rounds == 0
+
+
+@pytest.mark.parametrize("state", [FishingState.RESULT, FishingState.QUALITY])
+def test_misread_result_after_unconfirmed_start_does_not_count_a_round(state):
+    """Straight from the start screen, RESULT/QUALITY are misreads, not proof the cast began."""
+    controller = recovery()
+    observe(controller, FishingState.WAITING, 0)
+    controller.record_start_action(
+        observation(FishingState.WAITING, 0), Action(ActionType.TAP, x=50, y=170), "accessibility_gesture", 0.0,
+    )
+    assert observe(controller, FishingState.WAITING, 8.0)
+    observe(controller, state, 9.0)
+    assert controller.recovering
+    restart(controller, 10.0)
+    assert controller.progress.completed_rounds == 0
+    assert controller.retries == 1
+
+
+def test_catch_dismissed_during_a_miss_counts_the_round():
+    """The fish was really caught: continue past the dialog and count it."""
+    controller = recovery()
+    assert miss(controller)
+    observe(controller, FishingState.RESULT, 0.4)
+    observe(controller, FishingState.RESULT, 2.0)
+    assert not controller.recovering
+    observe(controller, FishingState.RESULT, 2.1)
+    observe(controller, FishingState.WAITING, 3.0)
+    assert controller.progress.completed_rounds == 1
+    assert controller.progress.stop_reason is None
+    assert controller.events[-1]["decision"] == "success"
+
+
+def test_lingering_qte_during_a_miss_recovery_does_not_confirm_the_start():
+    controller = recovery()
+    assert miss(controller)
+    assert controller.recovering
+    observe(controller, FishingState.QTE, 1.0)
+    assert controller.recovering
+    assert controller.progress.stop_reason is None
+
+
 def test_unconfirmed_start_does_not_retry_from_unsafe_waiting():
     controller = recovery()
     observe(controller, FishingState.WAITING, 0)
@@ -126,7 +234,7 @@ def test_known_phase_timeout_can_wait_for_safe_recovery(state):
     assert observe(controller, state, 40)
     assert controller.recovering
     assert not controller.progress.start_allowed
-    # Even a late RESULT during recovery cannot turn a failed attempt into a success.
+    # A single result frame during recovery is not a completed round.
     observe(controller, FishingState.RESULT, 40.1)
     restart(controller, 41.1)
     assert controller.retries == 1
@@ -148,7 +256,7 @@ def test_unknown_timeout_and_error_are_fatal(state):
 @pytest.mark.parametrize("changes", [
     {"confidence": 0.1}, {"action_button": None},
     {"gauge_box": Box(1, 1, 30, 5)}, {"prompt_box": Box(1, 1, 30, 5)},
-    {"hint": FishingState.UNKNOWN},
+    {"hint": FishingState.UNKNOWN}, {"frame_reused": True, "action_button": None},
     {"frame_decoded_s": 0.05},
 ])
 def test_unsafe_or_stale_waiting_cannot_restart(changes):
@@ -177,6 +285,20 @@ def test_static_reused_waiting_screen_restarts_after_retry_delay():
     assert not controller.recovering
     assert controller.retries == 1
     assert controller.progress.start_allowed
+
+
+def test_success_refills_retry_budget_when_requested():
+    controller = recovery(max_retry_attempts=1)
+    controller.refill_on_success = True
+    assert miss(controller)
+    restart(controller, 1.1)
+    observe(controller, FishingState.RESULT, 2)
+    observe(controller, FishingState.WAITING, 3)
+    assert controller.progress.completed_rounds == 1
+    assert controller.retries == 0
+    assert miss(controller, 4)
+    assert controller.recovering
+    assert controller.progress.stop_reason is None
 
 
 def test_post_failure_static_scrcpy_frame_can_establish_stability():

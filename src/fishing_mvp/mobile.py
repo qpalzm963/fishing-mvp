@@ -41,7 +41,7 @@ from .live import (
 from .models import Action, FishingState, FrameMetadata
 from .retry import AttemptRecovery
 from .state_machine import ActionPlanner, AutomationProgress, FishingStateMachine
-from .vision import FrameAnalyzer
+from .vision import FrameAnalyzer, detect_team_record_banner
 
 
 logger = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ class MobileSession:
         self.machine = FishingStateMachine(config.state_machine)
         self.planner = ActionPlanner(config.action)
         self.automation = AutomationProgress(max_rounds=self.max_rounds)
-        self.recovery = AttemptRecovery(config, self.automation)
+        self.recovery = AttemptRecovery(config, self.automation, refill_on_success=True)
         self.start = clock()
         self.state = FishingState.UNKNOWN
         self.frame_index = 0
@@ -149,6 +149,9 @@ class MobileSession:
         self.state_counts: dict[str, int] = {}
         self.input_path_counts: dict[str, int] = {}
         self.warning_counts: dict[str, int] = {}
+        self.team_records: list[dict[str, Any]] = []
+        self._team_record_latched = False
+        self._team_record_new = False
         self.analysis_ms_total = 0.0
         self.stop_reason: str | None = None
         self.error: dict[str, str] | None = None
@@ -242,6 +245,7 @@ class MobileSession:
         foreground_package: str | None,
     ) -> dict[str, Any]:
         config = self.config
+        self._team_record_new = False
         self._check_foreground(foreground_package)
         size = (int(frame.shape[1]), int(frame.shape[0]))
         if self.first_size is None:
@@ -267,6 +271,7 @@ class MobileSession:
             # current pixels and falls back to the full search when it is not there (for example on
             # the result screen), so this keeps the first QTE frame as cheap as the later ones.
             fast=not recovery.recovering,
+            min_local_button_score=config.action.min_confidence,
         )
         analysis_finished_at = self._clock()
         _annotate_frame_timing(
@@ -391,6 +396,9 @@ class MobileSession:
             if state == FishingState.QTE:
                 self.pending_qte_actions.append(action_record)
             self.actions.append(action_record)
+        self._team_record_new = self._observe_team_record(frame, state, timestamp_s)
+        if self._team_record_new:
+            record["team_record"] = True
         if transition is not None:
             try:
                 save_snapshot(
@@ -409,6 +417,43 @@ class MobileSession:
             self.stop_reason = automation.stop_reason
         return self._result(state, action, sent_action, detection.confidence, record["timing"]["analysis_ms"])
 
+    def _observe_team_record(self, frame: np.ndarray, state: FishingState, timestamp_s: float) -> bool:
+        # Re-arm only on the start screen: a result dialog that flickers to
+        # another state for a frame is still the same catch.
+        if state == FishingState.WAITING:
+            self._team_record_latched = False
+        if state != FishingState.RESULT:
+            return False
+        if self._team_record_latched or not detect_team_record_banner(frame):
+            return False
+        self._team_record_latched = True
+        index = len(self.team_records) + 1
+        name = f"team_record_{index:02d}_{timestamp_s:07.2f}.jpg"
+        snapshot = f"snapshots/{name}"
+        try:
+            save_snapshot(frame, self.output_dir / snapshot)
+        except Exception as exc:
+            self.warning_counts["team_record_snapshot_failed"] = (
+                self.warning_counts.get("team_record_snapshot_failed", 0) + 1
+            )
+            logger.warning("team record snapshot failed: %s", exc)
+            snapshot = ""
+        event = {
+            "timestamp_s": round(timestamp_s, 3),
+            "round": self.automation.completed_rounds + 1,
+            "snapshot": snapshot,
+            "logged_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        self.team_records.append(event)
+        log_path = self.output_dir.parent / "team_records.jsonl"
+        try:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"session": self.output_dir.name, **event}, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            self.warning_counts["team_record_log_failed"] = self.warning_counts.get("team_record_log_failed", 0) + 1
+            logger.warning("team record log failed: %s", exc)
+        return True
+
     def _result(
         self,
         state: FishingState | None,
@@ -425,6 +470,8 @@ class MobileSession:
             "max_rounds": self.max_rounds,
             "attempt": self.recovery.attempt,
             "recovering": self.recovery.recovering,
+            "team_records": len(self.team_records),
+            "team_record": self._team_record_new,
             "action": action.to_dict() if action else None,
             "sent": bool(self.send_actions and sent_action is not None and self.error is None),
             "analysis_ms": analysis_ms,
@@ -455,6 +502,7 @@ class MobileSession:
             "actions": self.actions,
             "input_path_counts": self.input_path_counts,
             "warning_counts": self.warning_counts,
+            "team_records": self.team_records,
             "qte_dispatch_latency_estimates_ms": self.planner.latency_estimates(),
             "log": str(self.log_path),
             "notes": [

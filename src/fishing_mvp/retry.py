@@ -23,6 +23,14 @@ class AttemptRecovery:
     events: list[dict[str, Any]] = field(default_factory=list)
     last_failure: str | None = None
     start_action: dict[str, Any] | None = None
+    # Phone sessions refill after a completed round so occasional misses do not
+    # end a long run. Desktop keeps one shared budget for the whole session.
+    refill_on_success: bool = False
+    result_since: float | None = None
+    # Waiting seen while a round is active, before it has lasted long enough
+    # to count as a failed cast. Phone frames often flash the start button
+    # between the prompt and the cast; desktop frames rarely do.
+    incomplete_since: float | None = None
 
     @property
     def recovering(self) -> bool:
@@ -76,6 +84,60 @@ class AttemptRecovery:
                     self.unknown_since = now
             else:
                 self.unknown_since = None
+            # A cast can keep the start button on screen longer than the
+            # unconfirmed-start timer. Prompt or the gauge means the tap
+            # landed; leave recovery and play this round instead of waiting
+            # for a start screen that is already gone. RESULT and QUALITY are
+            # not accepted: straight from the start screen they are misreads,
+            # and accepting them would count a round that never happened.
+            if (
+                self.last_failure == "start_unconfirmed"
+                and state in {FishingState.PROMPT, FishingState.CASTING, FishingState.QTE}
+            ):
+                self._event(detection, state, "start_confirmed", failure_reason=self.last_failure)
+                self.recovering_since = None
+                self.start_action = None
+                self.last_failure = None
+                self.unknown_since = None
+                progress.start_allowed = False
+                return False
+            # The round was marked dead on a brief return to the start button,
+            # then the cast continued. Play it instead of waiting for a start
+            # screen that the catch dialog is covering.
+            if (
+                self.last_failure == "attempt_incomplete"
+                and state in {
+                    FishingState.PROMPT, FishingState.CASTING,
+                    FishingState.QTE, FishingState.QUALITY,
+                }
+            ):
+                self._event(detection, state, "round_resumed", failure_reason=self.last_failure)
+                self.recovering_since = None
+                self.result_since = None
+                self.incomplete_since = None
+                self.last_failure = None
+                self.unknown_since = None
+                progress.start_allowed = False
+                return False
+            # One result frame during recovery can be a false positive, so it is
+            # not tapped. A dialog that stays up is the catch screen and still
+            # needs its continue tap; otherwise the session dies on the reward.
+            if state == FishingState.RESULT:
+                if self.result_since is None:
+                    self.result_since = now
+            else:
+                self.result_since = None
+            if (
+                self.last_failure in {"qte_miss", "attempt_incomplete"}
+                and self.result_since is not None
+                and now - self.result_since >= 1.5
+            ):
+                self._event(detection, state, "result_during_recovery", failure_reason=self.last_failure)
+                self.recovering_since = None
+                self.result_since = None
+                self.last_failure = None
+                self.unknown_since = None
+                return False
             if state == FishingState.ERROR or detection.hint == FishingState.ERROR:
                 progress.stop_reason = "state_error"
             elif self.unknown_since is not None and now - self.unknown_since >= cfg.unknown_timeout_s:
@@ -143,11 +205,26 @@ class AttemptRecovery:
             self._event(detection, state, "success", after_retry=self.last_failure is not None)
             self.qte_seen = False
             self.last_failure = None
+            if self.refill_on_success:
+                self.retries = 0
             if progress.stop_reason is None:
                 self.attempt += 1
             return False
 
-        incomplete = state == FishingState.WAITING and progress.round_active and not progress.result_seen
+        returned_to_waiting = (
+            state == FishingState.WAITING and progress.round_active and not progress.result_seen
+        )
+        if returned_to_waiting and not self.qte_seen:
+            if self.incomplete_since is None:
+                self.incomplete_since = now
+        else:
+            self.incomplete_since = None
+        # QTE already happened, so going back to the start button is a miss now.
+        # Before that, keep the round alive through a short flicker.
+        incomplete = returned_to_waiting and (
+            self.qte_seen
+            or (self.incomplete_since is not None and now - self.incomplete_since >= 1.5)
+        )
         timed_out = progress.timed_out(now, cfg)
         start_unconfirmed = (
             self.start_action is not None
@@ -197,10 +274,12 @@ class AttemptRecovery:
             self.events[-1]["stop_reason"] = progress.stop_reason
             return False
         self.recovering_since = now
+        self.incomplete_since = None
         self.failure_frame = detection.frame_index
         self.failure_pts = detection.frame_pts_us
         self.waiting_frames = 0
         self.unknown_since = None
+        self.result_since = None
         progress.start_allowed = False
         return True
 

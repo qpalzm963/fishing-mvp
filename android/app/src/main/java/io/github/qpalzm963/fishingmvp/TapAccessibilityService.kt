@@ -2,11 +2,14 @@ package io.github.qpalzm963.fishingmvp
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
@@ -24,10 +27,24 @@ class TapAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "FishingA11y"
+        private const val NULL_FOREGROUND_GRACE_MS = 2000L
 
         @Volatile
         var instance: TapAccessibilityService? = null
             private set
+
+        /** Runs on the main thread each time the service (re)connects. */
+        @Volatile
+        var onConnected: (() -> Unit)? = null
+
+        /** Switched on in system settings. The service can be on here yet still not bound ([instance] null). */
+        fun isEnabled(context: Context): Boolean {
+            val expected = ComponentName(context, TapAccessibilityService::class.java).flattenToString()
+            val enabled = Settings.Secure.getString(
+                context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+            ) ?: return false
+            return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
+        }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -39,10 +56,14 @@ class TapAccessibilityService : AccessibilityService() {
     @Volatile
     private var cachedAtMs = 0L
 
+    /** When the window list is briefly empty, keep the last confirmed package this long. */
+    private var nullSinceMs = 0L
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         refreshForeground()
+        mainHandler.post { onConnected?.invoke() }
         Log.i(TAG, "connected")
     }
 
@@ -74,9 +95,24 @@ class TapAccessibilityService : AccessibilityService() {
             Log.w(TAG, "foreground lookup failed", exc)
             null
         }
-        cachedPackage = pkg
-        cachedAtMs = SystemClock.uptimeMillis()
-        pkg
+        val now = SystemClock.uptimeMillis()
+        if (pkg != null) {
+            nullSinceMs = 0L
+            cachedPackage = pkg
+            cachedAtMs = now
+        } else {
+            // Reward animations and window churn often return an empty list for a moment.
+            // Clearing the cache here used to stop the session after a round or two.
+            if (nullSinceMs == 0L) nullSinceMs = now
+            cachedAtMs = now
+            if (cachedPackage != null && now - nullSinceMs > NULL_FOREGROUND_GRACE_MS) {
+                Log.w(TAG, "foreground unknown for ${NULL_FOREGROUND_GRACE_MS}ms; clearing cache")
+                cachedPackage = null
+            } else {
+                Log.i(TAG, "foreground lookup empty; keeping ${cachedPackage ?: "none"}")
+            }
+        }
+        cachedPackage
     }
 
     /** True for this app, the home screen and system UI: never a valid automation target. */

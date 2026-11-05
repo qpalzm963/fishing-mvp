@@ -1046,7 +1046,11 @@ class FrameAnalyzer:
             return 0.0
         return float(np.mean(roi >= self.config.motion_threshold))
 
-    def analyze(self, frame: np.ndarray, frame_index: int, timestamp_s: float, *, fast: bool = False) -> Detection:
+    def analyze(
+        self, frame: np.ndarray, frame_index: int, timestamp_s: float, *,
+        fast: bool = False, min_local_button_score: float = 0.68,
+    ) -> Detection:
+        """`min_local_button_score` should be the caller's tap threshold (`action.min_confidence`)."""
         height, width = frame.shape[:2]
         work, scale = _prepare_frame(frame, self.config.max_work_width)
         work_h, work_w = work.shape[:2]
@@ -1057,7 +1061,10 @@ class FrameAnalyzer:
                 self.previous_button_work,
                 self.config,
             )
-            if work_button is None:
+            # A nearby circle can lock onto a weak match. That score then stays
+            # under the tap threshold, so a visible start button is never pressed.
+            # Fall back to the full search unless the local match is actionable.
+            if work_button is None or button_score < min_local_button_score:
                 work_button, active, button_score, button_features = detect_action_button(work, self.config)
         else:
             work_button, active, button_score, button_features = detect_action_button(work, self.config)
@@ -1226,3 +1233,44 @@ class FrameAnalyzer:
             confidence=float(np.clip(confidence, 0.0, 1.0)),
             features=features,
         )
+
+
+def detect_team_record_banner(frame: np.ndarray) -> bool:
+    """True when a fish-result card is showing the yellow team-record banner.
+
+    The banner is a row of outlined yellow glyphs, the same lettering as
+    「恭喜獲得」. That reward screen has no catch card, and the sparkles on a
+    normal catch are too large to be glyphs, so neither is counted.
+    """
+
+    height, width = frame.shape[:2]
+    if height < 40 or width < 40:
+        return False
+    y0, y1 = int(height * 0.08), int(height * 0.40)
+    x0, x1 = int(width * 0.08), int(width * 0.92)
+    roi = frame[y0:y1, x0:x1]
+    if roi.size == 0:
+        return False
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    yellow = cv2.inRange(hsv, (15, 60, 140), (42, 255, 255))
+    count, _, stats, _ = cv2.connectedComponentsWithStats(yellow, 8)
+    glyphs: list[tuple[int, int]] = []
+    for index in range(1, count):
+        x, _y, glyph_w, glyph_h, area = (int(value) for value in stats[index])
+        if area < 80 or glyph_h < height * 0.035:
+            continue
+        if glyph_h > height * 0.16 or glyph_w > width * 0.22:
+            continue
+        glyphs.append((x, glyph_w))
+    if len(glyphs) < 2:
+        return False
+    span = (max(x + glyph_w for x, glyph_w in glyphs) - min(x for x, _w in glyphs)) / max(1, x1 - x0)
+    if span <= 0.28:
+        return False
+    card = frame[int(height * 0.28):int(height * 0.62), int(width * 0.20):int(width * 0.80)]
+    if card.size == 0:
+        return False
+    card_hsv = cv2.cvtColor(card, cv2.COLOR_BGR2HSV)
+    cyan = cv2.inRange(card_hsv, (80, 60, 120), (110, 255, 255))
+    purple = cv2.inRange(card_hsv, (125, 40, 80), (170, 255, 255))
+    return float(cyan.mean() + purple.mean()) / 255.0 >= 0.08

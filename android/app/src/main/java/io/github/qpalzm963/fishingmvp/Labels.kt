@@ -17,7 +17,7 @@ object Labels {
     fun stopReason(code: String): String = when {
         code == "user_stop" -> "你關閉了開關"
         code == "completed_rounds" -> "已完成設定的輪數"
-        code == "max_retry_attempts" -> "重試次數用完"
+        code == "max_retry_attempts" -> "連續重試次數用完"
         code == "retry_recovery_timeout" -> "重試時等不到回到起始畫面"
         code == "start_unconfirmed" -> "點了開始但畫面沒反應"
         code == "state_error" || code == "error" -> "發生錯誤"

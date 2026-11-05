@@ -97,7 +97,7 @@ Issue #5 的窄目標流程分成三層：`gauge_raw_target_range` 是原始觀�
 
 Tracker 對 target 收縮採立即收斂，單一較寬觀測不會重新放大 safe range；放大需要受限的連續證據，marker 遮蔽／短暫缺失最多沿用 4 幀，gauge 跳變或缺失過久會 reset。ETA 使用 `target_center`、marker velocity，以及 `frame_age + analysis_duration + dispatch_latency + tap_hold`；timing window 隨 target 寬度縮放，並支援 `[0, 1]` 邊界反彈預測。`detections.jsonl` 的 `features.gauge_refine`、`features.qte` 會記錄 raw／tracked／safe range、marker、velocity、ETA、input ETA、timing window、boundary mode、reflection 與 tap reason。
 
-2026-09-21 錄影的後段 QTE 回歸另修正兩種誤判：Cool 除了藍色面積，還須有橫向排列的字形組件，避免水面特效觸發 QUALITY 而停按；指針僅遮住黃區一側時，若未遮住的邊緣仍一致，最多沿用 `gauge_target_tracking_missing_frames` 幀的完整目標。未被指針遮擋的收縮與目標移動仍立即更新。影片重播只驗證偵測與點擊提案，實機命中仍需以 live 執行確認。
+2026-09-21 錄影的後段 QTE 回歸另修正兩種誤判：Cool 除了藍色面積，還須有橫向排列的字形組件，避免水面特效觸發 QUALITY 而停按；指針僅遮住黃區一側時，若未遮住的邊緣仍一致，最多沿用 `gauge_target_tracking_missing_frames` 幀的完整目標。未被指針遮擋的收縮與目標移動仍立即更新。影片重播只驗證偵測與點擊提案，實機命中仍需以 live 執行確認。QTE／QUALITY 期間若把「用力拉」一類提示誤判成 PROMPT，狀態機會留在拉力條，不會改去點提示。
 
 Quality 字樣搜尋區域若裁切為空，該幀會略過 quality 判定；與 action button 位置不合理的 gauge 會被拒絕，避免錯誤位置進入 QTE 點擊。逐幀 `features.quality_roi` 與 `features.gauge_geometry` 保留裁切範圍及拒絕原因，方便定位實機誤判。
 
@@ -187,13 +187,13 @@ automation:
   retry_recovery_timeout_s: 8.0
 ```
 
-只適用於 `live --full-auto`（包含 portable）；dry-run 只記錄決策與動作提案。`max_retry_attempts` 是整次執行共用的額外重試額度，成功一輪不補回額度；設為 0 即不重試。失敗不計入完成輪數，重試保留既有成功輪數，因此 N 輪最多有 N + 3 次嘗試。次數及毫秒間隔必須是非負整數，復原等待秒數必須是有限、非負數值。
+只適用於 `live --full-auto`（包含 portable）；dry-run 只記錄決策與動作提案。`max_retry_attempts` 是整次執行共用的額外重試額度，桌面版成功一輪不補回額度；設為 0 即不重試。手機端成功一輪會補回額度，見下方 Android 小節。失敗不計入完成輪數，重試保留既有成功輪數，因此桌面版 N 輪最多有 N + 3 次嘗試。次數及毫秒間隔必須是非負整數，復原等待秒數必須是有限、非負數值。
 
 QTE／QUALITY 未經 RESULT 就穩定回到 WAITING，或整段 QTE 超時，會標記 `qte_miss`。單次 tap 未見成功不立即結束整輪，仍保留原有下一次掃掠的補救。其他活動階段未經 RESULT 回到 WAITING，或已知階段超時，也可進入有限的復原等待；短暫按鈕／gauge 遺失不會立即重試。
 
-開始點擊實際送出後，若 `unconfirmed_waiting_timeout_s`（預設 8 秒）內仍停在 WAITING，會標記 `start_unconfirmed`。關閉 Auto Retry 時停止並在 portable 顯示明確訊息；開啟時只有再次確認安全的開始畫面，才可使用同一份重試額度。診斷事件會保存送出座標、輸入路徑、最後狀態與等待時間。未送出的 dry-run 提案不會觸發此判定。
+開始點擊實際送出後，若 `unconfirmed_waiting_timeout_s`（預設 8 秒）內仍停在 WAITING，會標記 `start_unconfirmed`。關閉 Auto Retry 時停止並在 portable 顯示明確訊息；開啟時只有再次確認安全的開始畫面，才可使用同一份重試額度。若復原期間畫面已經進入提示、拋竿或拉力條，表示開始點擊其實生效，會取消復原並繼續這一輪，而不是一直等已經不在的起始畫面。診斷事件會保存送出座標、輸入路徑、最後狀態與等待時間。未送出的 dry-run 提案不會觸發此判定。
 
-復原期間不送出任何輸入，也不計入遲到的結算。系統清除 detector、狀態機、QTE marker／target／velocity、pending observation、cooldown、re-arm 與延遲樣本。只有失敗後取得的畫面能確認 WAITING；信心須達原有門檻、開始按鈕可辨識、沒有 prompt／gauge，並連續符合 `stable_frames`，才能在重試間隔屆滿後重新開始。靜止 scrcpy 畫面可重用失敗後解碼的影格，失敗前的影格不能啟動重試。
+復原期間不送出任何輸入，也不計入遲到的結算。系統清除 detector、狀態機、QTE marker／target／velocity、pending observation、cooldown、re-arm 與延遲樣本。只有失敗後處理的畫面能確認 WAITING；信心須達原有門檻、開始按鈕可辨識、沒有 prompt／gauge，並連續符合 `stable_frames`，才能在重試間隔屆滿後重新開始。畫面已經停在安全的開始畫面時，MediaProjection 與 scrcpy 常常不再送新影格；重試間隔屆滿後可以沿用這張靜止畫面重新開始。還沒到重試間隔的重用影格，以及不是開始畫面的舊影格，仍然不能啟動重試。
 
 復原等待從判定失敗時計算，包含 retry delay；`retry_recovery_timeout_s` 應大於 `retry_delay_ms / 1000` 並留出辨識時間，否則會先逾時停止。等待超時記錄 `retry_recovery_timeout`，額度用盡記錄 `max_retry_attempts`。UNKNOWN 超時、ERROR、擷取／連線／權限／輸入錯誤仍停止；STOP／Ctrl+C／執行時間上限也不會觸發重試。
 
@@ -274,11 +274,15 @@ App 內的「執行自我測試」不需要遊戲：會在手機上用 5 張 fix
 3. 確認階段與時機都合理後，把模式開關切到「正式模式」（文字變紅）再打開「自動釣魚」才會真的點擊。每次停止後會自動回到試跑模式。
 4. 關掉「自動釣魚」開關會在下一次輸入前停止，不再送出新點擊。
 
-與 CLI 相同的安全條件：前景 package 不符、螢幕尺寸／方向改變、UNKNOWN 或階段超時、無障礙服務中斷、手勢被拒絕、MediaProjection 被系統或使用者停止時，都會停止且不再點擊。App「運行設定」步驟的「自動重試」開關預設開啟（整次執行共用 `max_retry_attempts` 次），且優先於檔案裡的 `auto_retry_enabled`；其他自訂設定可放在 App 外部儲存區 `files/` 資料夾下的 `config/user.yaml`，格式與 `--config` 相同。手機版在非重試復原期間，會一律先在上一幀按鈕附近驗證、驗證不過才退回完整搜尋（結算畫面等按鈕位置不同的畫面會自動走完整搜尋）。
+與 CLI 相同的安全條件：前景 package 確認變成別的 App、螢幕尺寸／方向改變、UNKNOWN 或階段超時、無障礙服務中斷、手勢被拒絕、MediaProjection 被系統或使用者停止時，都會停止且不再點擊。前景視窗列表偶爾會空一拍（結算動畫常見）；兩秒內會沿用上一個已確認的 package，避免一輪結束就被判定成切走。代價是：如果列表真的一直是空的（例如鎖定畫面），最多還會沿用舊 package 繼續點擊兩秒才停止；只有列表確實回報另一個 App 時才會立即停止。
+
+App「運行設定」步驟的「自動重試」開關預設開啟，而且優先於 `config/user.yaml` 的 `auto_retry_enabled`。失手後會等開始畫面再釣下一輪；成功完成一輪會把重試額度補滿，所以偶發失手不會在一兩輪後把整個工作階段停掉。連續失手仍受 `max_retry_attempts`（預設 3）限制。其他自訂設定可放在 App 外部儲存區 `files/` 資料夾下的 `config/user.yaml`，格式與 `--config` 相同。手機版在非重試復原期間，會一律先在上一幀按鈕附近驗證、驗證不過才退回完整搜尋（結算畫面等按鈕位置不同的畫面會自動走完整搜尋）。
 
 ### 紀錄
 
 每次開始都會在 App 外部儲存區建立 `sessions/日期時間/`（通常是 `/sdcard/Android/data/io.github.qpalzm963.fishingmvp/files/sessions/`），內容與 CLI live 相同：`live_detections.jsonl`、`live_summary.json`、`snapshots/`，另有 Android 端的 `android_session.json`（擷取／螢幕尺寸、機型）與 `android_events.log`。可用 `adb pull` 或檔案管理員取出。
+
+結算畫面若出現「突破團隊紀錄」橫幅，該輪只記一次：懸浮窗的執行資訊會累計次數，`live_summary.json` 的 `team_records` 會留下時間與截圖檔名，截圖在同一次的 `snapshots/team_record_*.jpg`。跨次紀錄附加在 `sessions/team_records.jsonl`。
 
 ### 已知限制
 
