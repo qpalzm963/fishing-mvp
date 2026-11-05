@@ -1236,11 +1236,12 @@ class FrameAnalyzer:
 
 
 def detect_team_record_banner(frame: np.ndarray) -> bool:
-    """True when a fish-result card is showing the yellow team-record banner.
+    """True when a fish-result card is showing the team-record banner.
 
-    The banner is a row of outlined yellow glyphs, the same lettering as
-    「恭喜獲得」. That reward screen has no catch card, and the sparkles on a
-    normal catch are too large to be glyphs, so neither is counted.
+    The banner 「刷新團隊紀錄」 is a row of glyphs shaded from yellow to green,
+    above the blue catch card. It appears large and then shrinks, so glyph
+    height has a low floor. 「恭喜獲得」 and the reward coins are plain yellow,
+    so only glyphs with a green share count, and they must line up in one row.
     """
 
     height, width = frame.shape[:2]
@@ -1252,19 +1253,26 @@ def detect_team_record_banner(frame: np.ndarray) -> bool:
     if roi.size == 0:
         return False
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    yellow = cv2.inRange(hsv, (15, 60, 140), (42, 255, 255))
-    count, _, stats, _ = cv2.connectedComponentsWithStats(yellow, 8)
-    glyphs: list[tuple[int, int]] = []
+    lettering = cv2.inRange(hsv, (15, 60, 140), (80, 255, 255))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(lettering, 8)
+    glyphs: list[tuple[int, int, float]] = []
     for index in range(1, count):
-        x, _y, glyph_w, glyph_h, area = (int(value) for value in stats[index])
-        if area < 80 or glyph_h < height * 0.035:
+        x, y, glyph_w, glyph_h, area = (int(value) for value in stats[index])
+        if area < 40 or glyph_h < height * 0.015:
             continue
         if glyph_h > height * 0.16 or glyph_w > width * 0.22:
             continue
-        glyphs.append((x, glyph_w))
-    if len(glyphs) < 2:
+        hue = hsv[..., 0][labels == index]
+        if float((hue >= 40).mean()) < 0.3:
+            continue
+        glyphs.append((x, glyph_w, (y + glyph_h / 2) / height))
+    if len(glyphs) < 5:
         return False
-    span = (max(x + glyph_w for x, glyph_w in glyphs) - min(x for x, _w in glyphs)) / max(1, x1 - x0)
+    row_center = float(np.median([center for *_, center in glyphs]))
+    row = [(x, glyph_w) for x, glyph_w, center in glyphs if abs(center - row_center) <= 0.04]
+    if len(row) < 5:
+        return False
+    span = (max(x + glyph_w for x, glyph_w in row) - min(x for x, _w in row)) / max(1, x1 - x0)
     if span <= 0.28:
         return False
     card = frame[int(height * 0.28):int(height * 0.62), int(width * 0.20):int(width * 0.80)]

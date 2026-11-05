@@ -24,3 +24,12 @@ Four 1080×2340 fixtures from
 The tests exercise these frames at both 540px and 1080px widths. The user
 identified the portion after 16s as requiring manual intervention; visible
 success animations in that portion are not evidence of automated success.
+
+Five 720×1560 frames from an Android live session on 2026-11-05 (SM-S9060,
+720px capture) cover the team-record banner:
+
+- `team_record_banner_large.jpg` — 「刷新團隊紀錄」 just appeared, large lettering
+- `team_record_banner_small.jpg` — the same banner shrunk, reward coins over the card
+- `reward_congrats.jpg` — 「恭喜獲得」 reward screen, falsely flagged by the first detector
+- `result_lag_waiting.jpg` — start screen captured while the state machine still held RESULT
+- `result_no_banner.jpg` — an ordinary catch card without the banner

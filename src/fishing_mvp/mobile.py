@@ -396,7 +396,7 @@ class MobileSession:
             if state == FishingState.QTE:
                 self.pending_qte_actions.append(action_record)
             self.actions.append(action_record)
-        self._team_record_new = self._observe_team_record(frame, state, timestamp_s)
+        self._team_record_new = self._observe_team_record(frame, state, detection.hint, timestamp_s)
         if self._team_record_new:
             record["team_record"] = True
         if transition is not None:
@@ -417,12 +417,16 @@ class MobileSession:
             self.stop_reason = automation.stop_reason
         return self._result(state, action, sent_action, detection.confidence, record["timing"]["analysis_ms"])
 
-    def _observe_team_record(self, frame: np.ndarray, state: FishingState, timestamp_s: float) -> bool:
+    def _observe_team_record(
+        self, frame: np.ndarray, state: FishingState, hint: FishingState, timestamp_s: float,
+    ) -> bool:
         # Re-arm only on the start screen: a result dialog that flickers to
         # another state for a frame is still the same catch.
         if state == FishingState.WAITING:
             self._team_record_latched = False
-        if state != FishingState.RESULT:
+        # The state machine holds RESULT for a few frames after the dialog
+        # closes; only a frame that itself reads as a result can carry the banner.
+        if state != FishingState.RESULT or hint != FishingState.RESULT:
             return False
         if self._team_record_latched or not detect_team_record_banner(frame):
             return False
