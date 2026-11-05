@@ -148,7 +148,7 @@ def test_unknown_timeout_and_error_are_fatal(state):
 @pytest.mark.parametrize("changes", [
     {"confidence": 0.1}, {"action_button": None},
     {"gauge_box": Box(1, 1, 30, 5)}, {"prompt_box": Box(1, 1, 30, 5)},
-    {"hint": FishingState.UNKNOWN}, {"frame_reused": True},
+    {"hint": FishingState.UNKNOWN}, {"frame_reused": True, "action_button": None},
     {"frame_decoded_s": 0.05},
 ])
 def test_unsafe_or_stale_waiting_cannot_restart(changes):
@@ -161,6 +161,35 @@ def test_unsafe_or_stale_waiting_cannot_restart(changes):
     assert controller.retries == 0
     observe(controller, FishingState.WAITING, 8.2)
     assert controller.progress.stop_reason == "retry_recovery_timeout"
+
+
+def test_static_reused_waiting_screen_restarts_after_retry_delay():
+    """A still start screen may keep one buffer from before the failure."""
+    controller = recovery(retry_delay_ms=100)
+    miss(controller)
+    assert controller.recovering
+    observe(controller, FishingState.WAITING, 0.15, frame_reused=True, frame_decoded_s=0.05)
+    assert controller.recovering
+    assert controller.retries == 0
+    observe(controller, FishingState.WAITING, 1.2, frame_reused=True, frame_decoded_s=0.05)
+    observe(controller, FishingState.WAITING, 1.3, frame_reused=True, frame_decoded_s=0.05)
+    assert not controller.recovering
+    assert controller.retries == 1
+    assert controller.progress.start_allowed
+
+
+def test_success_refills_retry_budget_when_requested():
+    controller = recovery(max_retry_attempts=1)
+    controller.refill_on_success = True
+    assert miss(controller)
+    restart(controller, 1.1)
+    observe(controller, FishingState.RESULT, 2)
+    observe(controller, FishingState.WAITING, 3)
+    assert controller.progress.completed_rounds == 1
+    assert controller.retries == 0
+    assert miss(controller, 4)
+    assert controller.recovering
+    assert controller.progress.stop_reason is None
 
 
 def test_post_failure_static_scrcpy_frame_can_establish_stability():

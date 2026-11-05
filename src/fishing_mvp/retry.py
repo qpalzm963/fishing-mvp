@@ -23,6 +23,9 @@ class AttemptRecovery:
     events: list[dict[str, Any]] = field(default_factory=list)
     last_failure: str | None = None
     start_action: dict[str, Any] | None = None
+    # Phone sessions refill after a completed round so occasional misses do not
+    # end a long run. Desktop keeps one shared budget for the whole session.
+    refill_on_success: bool = False
 
     @property
     def recovering(self) -> bool:
@@ -86,8 +89,15 @@ class AttemptRecovery:
                 self._event(detection, state, "stop", failure_reason=self.last_failure,
                             stop_reason=progress.stop_reason)
                 return False
-            # A reused scrcpy frame is allowed only if it was captured after
+            # A reused frame is normally allowed only when it was captured after
             # recovery began. Static screens do not necessarily emit new PTS.
+            safe_waiting = (
+                detection.hint == FishingState.WAITING
+                and detection.confidence >= self.config.action.min_confidence
+                and detection.action_button is not None
+                and detection.prompt_box is None
+                and detection.gauge_box is None
+            )
             fresh = detection.frame_index > self.failure_frame
             if detection.frame_decoded_s is not None:
                 fresh = fresh and detection.frame_decoded_s > self.recovering_since
@@ -95,12 +105,20 @@ class AttemptRecovery:
                 fresh = fresh and not detection.frame_reused
             if self.failure_pts is not None and detection.frame_pts_us is not None:
                 fresh = fresh and detection.frame_pts_us != self.failure_pts
-            ready = (
-                fresh and detection.hint == FishingState.WAITING
-                and detection.confidence >= self.config.action.min_confidence
-                and detection.action_button is not None
-                and detection.prompt_box is None and detection.gauge_box is None
-            )
+            # MediaProjection (and scrcpy) often stop delivering buffers once the
+            # start UI is already on screen. The last buffer still shows that UI,
+            # but its timestamp is from before the failure, so the gate above
+            # rejects it and recovery times out. After the retry delay, a safe
+            # reused waiting frame is the current screen and may restart.
+            if (
+                not fresh
+                and detection.frame_reused
+                and safe_waiting
+                and elapsed >= cfg.retry_delay_ms / 1000.0
+                and detection.frame_index > self.failure_frame
+            ):
+                fresh = True
+            ready = fresh and safe_waiting
             self.waiting_frames = self.waiting_frames + 1 if ready else 0
             if (state == FishingState.WAITING
                     and self.waiting_frames >= self.config.state_machine.stable_frames
@@ -130,6 +148,8 @@ class AttemptRecovery:
             self._event(detection, state, "success", after_retry=self.last_failure is not None)
             self.qte_seen = False
             self.last_failure = None
+            if self.refill_on_success:
+                self.retries = 0
             if progress.stop_reason is None:
                 self.attempt += 1
             return False

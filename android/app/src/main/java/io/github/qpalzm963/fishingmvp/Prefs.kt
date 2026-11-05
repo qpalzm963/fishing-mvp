@@ -8,6 +8,7 @@ object Prefs {
     private const val KEY_PACKAGE = "target_package"
     private const val KEY_CAPTURE_WIDTH = "capture_width"
     private const val KEY_ROUNDS = "rounds"
+    private const val KEY_AUTO_RETRY = "auto_retry"
 
     /** Capture widths offered in the UI; smaller = lower QTE latency, less detail. */
     val CAPTURE_WIDTHS = intArrayOf(540, 720, 1080)
@@ -33,5 +34,12 @@ object Prefs {
 
     fun setRounds(context: Context, value: Int) {
         prefs(context).edit().putInt(KEY_ROUNDS, value.coerceIn(1, 999)).apply()
+    }
+
+    /** Failed rounds retry from the start screen. On by default so one miss does not end the run. */
+    fun autoRetry(context: Context): Boolean = prefs(context).getBoolean(KEY_AUTO_RETRY, true)
+
+    fun setAutoRetry(context: Context, value: Boolean) {
+        prefs(context).edit().putBoolean(KEY_AUTO_RETRY, value).apply()
     }
 }

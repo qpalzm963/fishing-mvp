@@ -17,7 +17,7 @@ import android.widget.TextView
 
 /**
  * Small draggable floating panel: rounds (1–999), Dry-run/LIVE switch,
- * Start/Stop and a status line.  The window is not focusable so it never
+ * failure retry, Start/Stop and a status line.  The window is not focusable so it never
  * steals input focus from the game, and taps inside its bounds are refused.
  * LIVE resets to off after every session.
  */
@@ -50,6 +50,7 @@ class OverlayController(
     private val root: LinearLayout
     private val roundsView: TextView
     private val liveSwitch: Switch
+    private val retrySwitch: Switch
     private val startButton: Button
     private val stopButton: Button
     private val statusView: TextView
@@ -117,6 +118,13 @@ class OverlayController(
             }
         }
         root.addView(liveSwitch)
+        retrySwitch = Switch(context).apply {
+            text = "失敗後重試"
+            setTextColor(Color.LTGRAY)
+            isChecked = Prefs.autoRetry(context)
+            setOnCheckedChangeListener { _, checked -> Prefs.setAutoRetry(context, checked) }
+        }
+        root.addView(retrySwitch)
 
         val controls = row()
         startButton = button("開始") {
@@ -174,6 +182,7 @@ class OverlayController(
         startButton.isEnabled = !running
         stopButton.isEnabled = running
         liveSwitch.isEnabled = !running
+        retrySwitch.isEnabled = !running
         if (!running) liveSwitch.isChecked = false // back to dry-run after every session
     }
 

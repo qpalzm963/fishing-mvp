@@ -217,10 +217,11 @@ class AutomationService : Service() {
                     .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
                     .put("sdk", Build.VERSION.SDK_INT)
                     .put("min_tap_ms", GestureDispatcher.MIN_TAP_MS)
+                    .put("auto_retry", Prefs.autoRetry(this))
                     .toString(2)
             )
         }
-        event("session start live=$live rounds=$rounds package=$target")
+        event("session start live=$live rounds=$rounds package=$target autoRetry=${Prefs.autoRetry(this)}")
         var summary: String? = null
         var session: PyObject? = null
         try {
@@ -242,6 +243,7 @@ class AutomationService : Service() {
                 target,
                 if (configFile.isFile) configFile.absolutePath else null,
                 dispatcher,
+                Prefs.autoRetry(this),
             )
             session.callAttr("set_device_size", screenW, screenH)
             var buffer: ByteArray? = null
@@ -266,6 +268,12 @@ class AutomationService : Service() {
                     capturedAt = captureTimestampSeconds(image.timestamp)
                     reused = false
                     lastNewFrameMs = SystemClock.uptimeMillis()
+                }
+                // A still start screen often produces no new VirtualDisplay buffer.
+                // The retained pixels are what is on screen now; restamp them so
+                // recovery does not treat that screen as a pre-failure frame.
+                if (reused && buffer != null) {
+                    capturedAt = System.nanoTime() / 1_000_000_000.0
                 }
                 val frame = buffer
                 if (frame == null) {
@@ -305,7 +313,8 @@ class AutomationService : Service() {
             mainHandler.post {
                 overlay?.setRunning(false)
                 overlay?.setStatus(
-                    "已停止：$reason（完成 $done/$rounds）" + (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
+                    "已停止：${Labels.stopReason(reason)}（完成 $done/$rounds）" +
+                        (err?.let { "\n$it" } ?: "") + "\n紀錄：sessions/${dir.name}"
                 )
             }
         }
@@ -314,12 +323,12 @@ class AutomationService : Service() {
     private fun postStatus(result: JSONObject, live: Boolean) {
         val text = buildString {
             append(if (live) "LIVE" else "DRY-RUN")
-            append(" · ").append(result.optString("state"))
+            append(" · ").append(Labels.state(result.optString("state")))
             append(" · ").append(result.optInt("completed_rounds")).append('/').append(result.optInt("max_rounds"))
             if (!result.isNull("analysis_ms")) append(" · ").append(result.optDouble("analysis_ms").toInt()).append("ms")
             val action = result.optJSONObject("action")
             if (action != null) append(if (result.optBoolean("sent")) "\n點擊：" else "\n提案：").append(action.optString("reason"))
-            if (result.optBoolean("recovering")) append("\n重試復原中…")
+            if (result.optBoolean("recovering")) append("\n重試復原中…（等待可辨識的開始畫面）")
         }
         mainHandler.post { overlay?.setStatus(text) }
     }
