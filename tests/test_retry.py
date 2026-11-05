@@ -11,6 +11,8 @@ from fishing_mvp.state_machine import AutomationProgress
 
 
 def observation(state, t, **kwargs):
+    # A start screen shows a lit button; tests opt into a greyed one explicitly.
+    kwargs.setdefault("action_active", True)
     return Detection(frame_index=int(t * 100) + 1, timestamp_s=t,
                      frame_width=100, frame_height=200, hint=state,
                      confidence=0.9, action_button=Box(40, 160, 20, 20), **kwargs)
@@ -71,6 +73,55 @@ def test_sent_start_stops_with_diagnostic_reason_after_eight_seconds():
     assert event["last_state"] == "waiting"
     assert event["start_action"]["input_path"] == "scrcpy_control"
     assert (event["start_action"]["x"], event["start_action"]["y"]) == (50, 170)
+
+
+def _tap_start(controller, t=0.0):
+    observe(controller, FishingState.WAITING, t)
+    controller.record_start_action(
+        observation(FishingState.WAITING, t), Action(ActionType.TAP, x=50, y=170), "accessibility_gesture", t,
+    )
+
+
+def test_greyed_start_button_confirms_the_tap_through_a_long_bite_wait():
+    """Phone, 2026-11-05: the button greys ~0.4 s after the tap and the bite comes at 7.7-8.3 s.
+
+    The 8 s unconfirmed-start timer used to fire on 3 of 8 rounds; with auto retry off
+    that stops the whole session even though the tap worked.
+    """
+    controller = recovery()
+    controller.config.automation.auto_retry_enabled = False
+    _tap_start(controller)
+    for t in (0.4, 0.5, 0.6, 4.0, 7.6):
+        observe(controller, FishingState.WAITING, t, action_active=False)
+    assert controller.events[-1]["decision"] == "start_acknowledged"
+    observe(controller, FishingState.WAITING, 8.2)  # button lights up just before the bite
+    assert controller.progress.stop_reason is None
+    assert not controller.progress.start_allowed, "no second start tap during the bite wait"
+    observe(controller, FishingState.PROMPT, 8.3)
+    assert controller.progress.stop_reason is None
+    assert controller.start_action is None
+
+
+def test_brief_grey_flicker_does_not_confirm_the_start():
+    controller = recovery()
+    controller.config.automation.auto_retry_enabled = False
+    _tap_start(controller)
+    observe(controller, FishingState.WAITING, 0.4, action_active=False)
+    observe(controller, FishingState.WAITING, 0.5, action_active=False)
+    observe(controller, FishingState.WAITING, 0.6)
+    observe(controller, FishingState.WAITING, 8.0)
+    assert controller.progress.stop_reason == "start_unconfirmed"
+
+
+def test_acknowledged_start_that_never_bites_still_times_out():
+    controller = recovery(waiting_timeout_s=30.0)
+    controller.config.automation.auto_retry_enabled = False
+    _tap_start(controller)
+    for t in (0.4, 0.5, 0.6, 15.0):
+        observe(controller, FishingState.WAITING, t, action_active=False)
+    assert controller.progress.stop_reason is None
+    observe(controller, FishingState.WAITING, 30.1, action_active=False)
+    assert controller.progress.stop_reason == "state_timeout:waiting"
 
 
 def test_sent_start_retries_only_from_a_confirmed_safe_waiting_screen():

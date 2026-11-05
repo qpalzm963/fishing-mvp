@@ -200,6 +200,23 @@ class AttemptRecovery:
             self.start_action = None
         elif self.start_action is not None:
             progress.start_allowed = False
+            # The game greys the start button about 0.4 s after a tap that
+            # landed and keeps it grey while it waits for a bite, about 7.5 s
+            # on the phone. That wait can outlast the unconfirmed-start timer,
+            # so a button that stays grey confirms the tap. If the game then
+            # never moves on, the ordinary waiting timeout still applies.
+            greyed = (
+                state == FishingState.WAITING
+                and detection.action_button is not None
+                and not detection.action_active
+                and now > self.start_action["timestamp_s"]
+            )
+            if not self.start_action.get("acknowledged"):
+                frames = self.start_action.get("greyed_frames", 0) + 1 if greyed else 0
+                self.start_action["greyed_frames"] = frames
+                if frames >= 3:
+                    self.start_action["acknowledged"] = True
+                    self._event(detection, state, "start_acknowledged")
         self.qte_seen |= state in {FishingState.QTE, FishingState.QUALITY}
         if progress.completed_rounds > before:
             self._event(detection, state, "success", after_retry=self.last_failure is not None)
@@ -228,6 +245,7 @@ class AttemptRecovery:
         timed_out = progress.timed_out(now, cfg)
         start_unconfirmed = (
             self.start_action is not None
+            and not self.start_action.get("acknowledged")
             and state == FishingState.WAITING
             and now - self.start_action["timestamp_s"] >= max(0.0, cfg.unconfirmed_waiting_timeout_s)
         )

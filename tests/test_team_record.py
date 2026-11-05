@@ -28,14 +28,24 @@ def _load(name: str) -> np.ndarray:
 
 
 @pytest.mark.parametrize("name", [
-    "team_record_banner_large.jpg",  # banner just appeared, glyphs run past the edges
-    "team_record_banner_small.jpg",  # banner shrunk, reward coins flying over the card
+    "team_record_banner_large.jpg",   # banner just appeared, glyphs run past the edges
+    "team_record_banner_small.jpg",   # banner shrunk, reward coins flying over the card
+    "team_record_banner_dog.jpg",     # large again, first glyph off screen
+    "team_record_banner_magnet.jpg",  # small, over the faded start screen
 ])
 @pytest.mark.parametrize("width", [540, 720, 1080])
 def test_real_team_record_banner_is_detected(name: str, width: int) -> None:
     frame = _load(name)
     height = round(frame.shape[0] * width / frame.shape[1])
     assert detect_team_record_banner(cv2.resize(frame, (width, height)))
+
+
+@pytest.mark.parametrize("width", [540, 720, 1080])
+def test_personal_record_banner_is_not_a_team_record(width: int) -> None:
+    # 「刷新個人紀錄」 shares the lettering; only the team record is counted.
+    frame = _load("personal_record_banner.jpg")
+    height = round(frame.shape[0] * width / frame.shape[1])
+    assert not detect_team_record_banner(cv2.resize(frame, (width, height)))
 
 
 @pytest.mark.parametrize("name", [

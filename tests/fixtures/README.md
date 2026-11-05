@@ -33,3 +33,9 @@ Five 720×1560 frames from an Android live session on 2026-11-05 (SM-S9060,
 - `reward_congrats.jpg` — 「恭喜獲得」 reward screen, falsely flagged by the first detector
 - `result_lag_waiting.jpg` — start screen captured while the state machine still held RESULT
 - `result_no_banner.jpg` — an ordinary catch card without the banner
+
+Three more frames from the same phone on 2026-11-05 (17:11 and 17:14 sessions):
+
+- `team_record_banner_dog.jpg` — 「刷新團隊紀錄」 large, first glyph off screen
+- `team_record_banner_magnet.jpg` — 「刷新團隊紀錄！」 small
+- `personal_record_banner.jpg` — 「刷新個人紀錄！」, same lettering; must not count as a team record

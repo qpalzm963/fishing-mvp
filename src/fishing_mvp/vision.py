@@ -1242,6 +1242,8 @@ def detect_team_record_banner(frame: np.ndarray) -> bool:
     above the blue catch card. It appears large and then shrinks, so glyph
     height has a low floor. 「恭喜獲得」 and the reward coins are plain yellow,
     so only glyphs with a green share count, and they must line up in one row.
+    「刷新個人紀錄」 uses the same lettering; it is told apart by the hollow 「固」
+    frame inside 「個」 (see `_has_hollow_narrow_frame`).
     """
 
     height, width = frame.shape[:2]
@@ -1255,7 +1257,7 @@ def detect_team_record_banner(frame: np.ndarray) -> bool:
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     lettering = cv2.inRange(hsv, (15, 60, 140), (80, 255, 255))
     count, labels, stats, _ = cv2.connectedComponentsWithStats(lettering, 8)
-    glyphs: list[tuple[int, int, float]] = []
+    glyphs: list[tuple[int, int, float, int]] = []
     for index in range(1, count):
         x, y, glyph_w, glyph_h, area = (int(value) for value in stats[index])
         if area < 40 or glyph_h < height * 0.015:
@@ -1265,15 +1267,19 @@ def detect_team_record_banner(frame: np.ndarray) -> bool:
         hue = hsv[..., 0][labels == index]
         if float((hue >= 40).mean()) < 0.3:
             continue
-        glyphs.append((x, glyph_w, (y + glyph_h / 2) / height))
+        glyphs.append((x, glyph_w, (y + glyph_h / 2) / height, index))
     if len(glyphs) < 5:
         return False
-    row_center = float(np.median([center for *_, center in glyphs]))
-    row = [(x, glyph_w) for x, glyph_w, center in glyphs if abs(center - row_center) <= 0.04]
+    row_center = float(np.median([center for _x, _w, center, _i in glyphs]))
+    row = [(x, glyph_w, index) for x, glyph_w, center, index in glyphs if abs(center - row_center) <= 0.04]
     if len(row) < 5:
         return False
-    span = (max(x + glyph_w for x, glyph_w in row) - min(x for x, _w in row)) / max(1, x1 - x0)
+    span = (max(x + glyph_w for x, glyph_w, _i in row) - min(x for x, _w, _i in row)) / max(1, x1 - x0)
     if span <= 0.28:
+        return False
+    row_mask = np.isin(labels, [index for *_, index in row]).astype(np.uint8) * 255
+    row_height = float(np.percentile([int(stats[index][3]) for *_, index in row], 90))
+    if _has_hollow_narrow_frame(row_mask, row_height):
         return False
     card = frame[int(height * 0.28):int(height * 0.62), int(width * 0.20):int(width * 0.80)]
     if card.size == 0:
@@ -1282,3 +1288,34 @@ def detect_team_record_banner(frame: np.ndarray) -> bool:
     cyan = cv2.inRange(card_hsv, (80, 60, 120), (110, 255, 255))
     purple = cv2.inRange(card_hsv, (125, 40, 80), (170, 255, 255))
     return float(cyan.mean() + purple.mean()) / 255.0 >= 0.08
+
+
+def _has_hollow_narrow_frame(mask: np.ndarray, row_height: float) -> bool:
+    """True when the banner row holds 「固」's frame, i.e. it reads 「個人」.
+
+    「固」 is a closed 「囗」 about two thirds of a character wide whose inside
+    stays mostly open. 「團」's frame is full width and its inner strokes touch
+    it, and none of 「刷新隊紀錄」 enclose a large hole, so on the team banner no
+    outline matches. Measured on phone frames at 480-1080px widths: 「固」 hole
+    0.29-0.47 of its box, every team-banner outline at most 0.13.
+    """
+
+    if row_height <= 0:
+        return False
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return False
+    for index, contour in enumerate(contours):
+        if hierarchy[0][index][3] != -1:
+            continue
+        _x, _y, frame_w, frame_h = cv2.boundingRect(contour)
+        if frame_h < 0.8 * row_height or not 0.45 <= frame_w / row_height <= 0.85:
+            continue
+        hole = 0.0
+        child = hierarchy[0][index][2]
+        while child != -1:
+            hole = max(hole, cv2.contourArea(contours[child]))
+            child = hierarchy[0][child][0]
+        if hole >= 0.2 * frame_w * frame_h:
+            return True
+    return False
